@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+sqlalchemy
+python-multipart
+transformers
+torch
+pillow
+openai
+requests
+python-dotenv
+runwayml
