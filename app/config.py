@@ -1,0 +1,19 @@
+import os
+from dotenv import load_dotenv
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+UPLOAD_DIR = os.path.join(BASE_DIR, "..", "uploaded_images")
+
+# Create upload folder if it doesn't exist
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+load_dotenv()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_PROJECT = os.getenv("OPENAI_PROJECT", "").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
+
+RUNWAY_API_KEY = os.getenv("RUNWAY_API_KEY")
+# Public API uses the dev host per Runway docs/error message
+RUNWAY_API_URL = os.getenv("RUNWAY_API_URL", "https://api.dev.runwayml.com/v1")
+SECRET_KEY = os.getenv("JWT_SECRET", "supersecretkey")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60  # 1 hour
