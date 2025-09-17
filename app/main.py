@@ -22,6 +22,8 @@ app.include_router(admin.router, prefix="/api")
 app.include_router(auth.router, prefix="/auth")
 os.makedirs("videos", exist_ok=True)
 app.mount("/videos", StaticFiles(directory="videos"), name="videos")
+os.makedirs("uploaded_images", exist_ok=True)
+app.mount("/uploaded_images", StaticFiles(directory="uploaded_images"), name="uploaded_images")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
