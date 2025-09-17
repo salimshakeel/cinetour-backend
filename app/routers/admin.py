@@ -5,8 +5,48 @@ import shutil
 import time
 from app.models.database import SessionLocal, Order, UploadedImage, Video, User
 from sqlalchemy.sql import func
-
+from app.services.runway_service import generate_video
+from datetime import timedelta
 router = APIRouter()
+# ---------------- ADMIN: VIDEOS LISTING ----------------
+@router.get("/admin/videos", tags=["Admin Portal"])
+def list_videos():
+    """Return latest videos with playable/downloadable URLs and related client/image info."""
+    db = SessionLocal()
+    try:
+        videos = db.query(Video).order_by(Video.created_at.desc()).limit(200).all()
+
+        items = []
+        for v in videos:
+            filename = os.path.basename(v.video_path) if v.video_path else None
+            local_url = f"/videos/{filename}" if filename else None
+            # fetch image and order for context
+            image = db.query(UploadedImage).filter(UploadedImage.id == v.image_id).first()
+            order = db.query(Order).filter(Order.id == image.order_id).first() if image else None
+            client_id = order.user_id if order else None
+            # build image public url
+            image_url = f"/uploaded_images/{image.filename}" if image and image.filename else None
+            items.append({
+                "video_id": v.id,
+                "image_id": v.image_id,
+                "client_id": client_id,
+                "status": v.status,
+                "prompt": v.prompt,
+                "created_at": v.created_at.isoformat() if v.created_at else None,
+                "iteration": v.iteration,
+                "runway_job_id": v.runway_job_id,
+                "remote_url": v.video_url,
+                "local_url": local_url,
+                "filename": filename,
+                "download_url": local_url,  # same as local_url; frontend can use download attribute
+                "image_filename": image.filename if image else None,
+                "image_url": image_url,
+            })
+
+        return {"videos": items, "count": len(items)}
+    finally:
+        db.close()
+
 
 # ---------------- ADMIN: ORDER MANAGEMENT ----------------
 @router.get("/Admin/order_management", tags=["Admin Portal"])
@@ -191,5 +231,254 @@ async def admin_upload_final_video(order_id: int, file: UploadFile = File(...)):
             "local_url": f"/videos/{filename}",
             "video_path": video_path,
         }
+    finally:
+        db.close()
+
+
+# ----------------------- ADMIN: CUSTOMIZE PROMPT & REGENERATE -----------------------
+@router.post("/admin/orders/{image_id}/regenerate", tags=["Admin Portal"])
+def admin_regenerate_video(image_id: int, payload: dict):
+    """Regenerate a video's latest iteration from a custom prompt using RunwayML."""
+    new_prompt = (payload.get("prompt") or "").strip()
+    if not new_prompt:
+        raise HTTPException(status_code=422, detail="Prompt is required")
+
+    db = SessionLocal()
+    try:
+        image = db.query(UploadedImage).filter(UploadedImage.id == image_id).first()
+        if not image:
+            raise HTTPException(status_code=404, detail="Image not found")
+
+        # Determine input and output paths
+        image_path = os.path.join("uploads", image.filename)
+        if not os.path.exists(image_path):
+            raise HTTPException(status_code=404, detail="Source image file not found on server")
+
+        ts = int(time.time())
+        out_filename = f"regen_{image_id}_{ts}.mp4"
+        out_path = os.path.join("videos", out_filename)
+
+        # Create Video record first (with queued status)
+        video = Video(
+            image_id=image.id,
+            prompt=new_prompt,
+            iteration=next_iteration,
+            status="queued",
+            runway_job_id=None
+        )
+        db.add(video)
+        db.commit()
+        db.refresh(video)
+
+        # Call RunwayML with video_id for real-time tracking
+        try:
+            gen_result = generate_video(
+                prompt=new_prompt, 
+                image_path=image_path, 
+                output_path=out_path,
+                video_id=video.id
+            )
+        except Exception as e:
+            
+        # Update video status to failed
+            video.status = "failed"
+            video.updated_at = datetime.utcnow()
+            db.commit()
+            raise HTTPException(status_code=500, detail=str(e))
+
+        # Mirror basic info onto UploadedImage for convenience
+        image.video_path = out_path
+        image.video_url = gen_result.get("video_url")
+        image.video_generated_at = datetime.utcnow()
+        db.commit()
+
+        return {
+            "image_id": image.id,
+            "video_id": video.id,
+            "iteration": video.iteration,
+            "status": video.status,
+            "video_path": video.video_path,
+            "video_url": video.video_url,
+        }
+    finally:
+        db.close()
+
+
+# ----------------------- ADMIN: LOGS & STATUS -----------------------
+@router.get("/admin/logs-status", tags=["Admin Portal"])
+def admin_logs_status():
+    """Return real-time video processing status and detailed logs."""
+    db = SessionLocal()
+    try:
+        # Summary by status
+        status_counts = {
+            "queued": db.query(Video).filter(Video.status == "queued").count(),
+            "processing": db.query(Video).filter(Video.status == "processing").count(),
+            "succeeded": db.query(Video).filter(Video.status == "succeeded").count(),
+            "failed": db.query(Video).filter(Video.status == "failed").count(),
+        }
+
+        # Get all videos with detailed processing info
+        videos = (
+            db.query(Video)
+            .join(UploadedImage, Video.image_id == UploadedImage.id)
+            .join(Order, UploadedImage.order_id == Order.id)
+            .order_by(Video.created_at.desc())
+            .limit(50)
+            .all()
+        )
+
+        # Build detailed logs with processing timeline
+        logs = []
+        for v in videos:
+            # Get the uploaded image and order info
+            image = db.query(UploadedImage).filter(UploadedImage.id == v.image_id).first()
+            order = db.query(Order).filter(Order.id == image.order_id).first() if image else None
+            
+            # Calculate processing time
+            processing_time = None
+            if v.status == "succeeded" and v.created_at:
+                processing_time = (datetime.utcnow() - v.created_at).total_seconds()
+            
+            # Determine current stage
+            stage = "unknown"
+            if v.status == "queued":
+                stage = "Waiting in queue"
+            elif v.status == "processing":
+                stage = "Generating video with AI"
+            elif v.status == "succeeded":
+                stage = "Video completed"
+            elif v.status == "failed":
+                stage = "Generation failed"
+            
+            logs.append({
+                "video_id": v.id,
+                "image_id": v.image_id,
+                "order_id": order.id if order else None,
+                "iteration": v.iteration,
+                "status": v.status,
+                "stage": stage,
+                "prompt": v.prompt[:100] + "..." if v.prompt and len(v.prompt) > 100 else v.prompt,
+                "video_path": v.video_path,
+                "video_url": v.video_url,
+                "runway_job_id": v.runway_job_id,
+                "created_at": v.created_at.isoformat() if v.created_at else None,
+                "updated_at": v.updated_at.isoformat() if v.updated_at else None,
+                "processing_time_seconds": processing_time,
+                "client_email": order.user.email if order and order.user else "Guest",
+                "package": order.package if order else "Unknown"
+            })
+
+        # Get currently processing videos (for real-time updates)
+        processing_videos = [
+            {
+                "video_id": v.id,
+                "image_id": v.image_id,
+                "prompt": v.prompt[:50] + "..." if v.prompt and len(v.prompt) > 50 else v.prompt,
+                "started_at": v.created_at.isoformat() if v.created_at else None,
+                "elapsed_seconds": (datetime.utcnow() - v.created_at).total_seconds() if v.created_at else 0,
+                "runway_job_id": v.runway_job_id
+            }
+            for v in db.query(Video).filter(Video.status == "processing").all()
+        ]
+
+        return {
+            "status": status_counts,
+            "logs": logs,
+            "processing_now": processing_videos,
+            "last_updated": datetime.utcnow().isoformat()
+        }
+    finally:
+        db.close()
+
+
+# ----------------------- ADMIN: NOTIFICATIONS -----------------------
+@router.get("/admin/notifications", tags=["Admin Portal"])
+def admin_notifications():
+    """Derived notifications for admin UI (user activity, video jobs, system status)."""
+    db = SessionLocal()
+    try:
+        notifications = []
+        
+        # Video processing notifications
+        failed_count = db.query(Video).filter(Video.status == "failed").count()
+        processing_count = db.query(Video).filter(Video.status == "processing").count()
+        
+        if failed_count:
+            notifications.append({
+                "type": "error", 
+                "message": f"{failed_count} video jobs failed. Review and retry.",
+                "category": "video_processing"
+            })
+        if processing_count:
+            notifications.append({
+                "type": "info", 
+                "message": f"{processing_count} video jobs currently processing.",
+                "category": "video_processing"
+            })
+
+        # User activity notifications (recent sign-ins)
+        recent_users = (
+            db.query(User)
+            .filter(User.created_at >= datetime.utcnow() - timedelta(hours=24))
+            .order_by(User.created_at.desc())
+            .limit(5)
+            .all()
+        )
+        
+        for user in recent_users:
+            if user.is_guest:
+                notifications.append({
+                    "type": "info",
+                    "message": f"New guest user #{user.id} joined",
+                    "category": "user_activity",
+                    "user_id": user.id,
+                    "timestamp": user.created_at.isoformat()
+                })
+            else:
+                notifications.append({
+                    "type": "success",
+                    "message": f"New user registered: {user.email}",
+                    "category": "user_activity",
+                    "user_id": user.id,
+                    "email": user.email,
+                    "timestamp": user.created_at.isoformat()
+                })
+
+        # Recent video completions
+        recent_success = (
+            db.query(Video)
+            .filter(Video.status == "succeeded")
+            .order_by(Video.id.desc())
+            .limit(3)
+            .all()
+        )
+        
+        for v in recent_success:
+            notifications.append({
+                "type": "success",
+                "message": f"Video #{v.id} (image {v.image_id}) completed.",
+                "category": "video_processing",
+                "video_path": v.video_path,
+                "video_id": v.id
+            })
+
+        # System health check
+        total_users = db.query(User).count()
+        total_orders = db.query(Order).count()
+        total_videos = db.query(Video).count()
+        
+        notifications.append({
+            "type": "info",
+            "message": f"System stats: {total_users} users, {total_orders} orders, {total_videos} videos",
+            "category": "system_stats",
+            "stats": {
+                "users": total_users,
+                "orders": total_orders,
+                "videos": total_videos
+            }
+        })
+
+        return {"notifications": notifications}
     finally:
         db.close()
