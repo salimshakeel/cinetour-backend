@@ -10,3 +10,4 @@ requests
 python-dotenv
 runwayml
 google-auth
+psycopg2-binary
