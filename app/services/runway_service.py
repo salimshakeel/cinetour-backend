@@ -18,15 +18,30 @@ json_headers = {**headers, "Content-Type": "application/json"}
 IMAGE_TO_VIDEO_ENDPOINT = os.getenv("RUNWAY_IMAGE_TO_VIDEO_ENDPOINT", "/image_to_video")
 TASKS_ENDPOINT = os.getenv("RUNWAY_TASKS_ENDPOINT", "/tasks")
 
-def generate_video(prompt: str, image_path: str, output_path: str):
+def generate_video(prompt: str, image_path: str, output_path: str, video_id: int = None):
     """
     Send prompt + image to RunwayML API, poll until video is ready,
-    then save locally.
+    then save locally. Updates database status in real-time.
     """
+    from app.models.database import SessionLocal, Video
+    from datetime import datetime
+    
     if not os.path.exists(image_path):
         raise FileNotFoundError(f"Image file not found: {image_path}")
     if not prompt.strip():
         raise ValueError("Prompt cannot be empty")
+
+    # Update status to processing if video_id provided
+    if video_id:
+        db = SessionLocal()
+        try:
+            video = db.query(Video).filter(Video.id == video_id).first()
+            if video:
+                video.status = "processing"
+                video.updated_at = datetime.utcnow()
+                db.commit()
+        finally:
+            db.close()
 
     with open(image_path, "rb") as f:
         image_b64 = base64.b64encode(f.read()).decode("utf-8")
@@ -45,6 +60,17 @@ def generate_video(prompt: str, image_path: str, output_path: str):
         response = requests.post(tasks_url, headers=json_headers, json=payload, timeout=120)
         response.raise_for_status()
     except requests.RequestException as e:
+        # Update status to failed
+        if video_id:
+            db = SessionLocal()
+            try:
+                video = db.query(Video).filter(Video.id == video_id).first()
+                if video:
+                    video.status = "failed"
+                    video.updated_at = datetime.utcnow()
+                    db.commit()
+            finally:
+                db.close()
         raise Exception(f"RunwayML job creation failed: {str(e)}") from e
 
     job = response.json()
@@ -52,7 +78,19 @@ def generate_video(prompt: str, image_path: str, output_path: str):
     if not job_id:
         raise Exception(f"Unexpected RunwayML response structure: {job}")
 
-    # Polling
+    # Update runway_job_id in database
+    if video_id:
+        db = SessionLocal()
+        try:
+            video = db.query(Video).filter(Video.id == video_id).first()
+            if video:
+                video.runway_job_id = job_id
+                video.updated_at = datetime.utcnow()
+                db.commit()
+        finally:
+            db.close()
+
+    # Polling with real-time status updates
     status_url = urljoin(RUNWAY_API_URL.rstrip("/") + "/", TASKS_ENDPOINT.lstrip("/") + f"/{job_id}")
     max_attempts, attempts = 60, 0
 
@@ -61,6 +99,17 @@ def generate_video(prompt: str, image_path: str, output_path: str):
             res = requests.get(status_url, headers=headers, timeout=60)
             res.raise_for_status()
         except requests.RequestException as e:
+            # Update status to failed
+            if video_id:
+                db = SessionLocal()
+                try:
+                    video = db.query(Video).filter(Video.id == video_id).first()
+                    if video:
+                        video.status = "failed"
+                        video.updated_at = datetime.utcnow()
+                        db.commit()
+                finally:
+                    db.close()
             raise Exception(f"Failed to check task status: {str(e)}") from e
 
         task_status = res.json()
@@ -82,12 +131,49 @@ def generate_video(prompt: str, image_path: str, output_path: str):
             with open(output_path, "wb") as v:
                 v.write(video_resp.content)
 
-            return {"video_url": video_url, "file_path": output_path}
+            # Update status to succeeded
+            if video_id:
+                db = SessionLocal()
+                try:
+                    video = db.query(Video).filter(Video.id == video_id).first()
+                    if video:
+                        video.status = "succeeded"
+                        video.video_path = output_path
+                        video.video_url = video_url
+                        video.updated_at = datetime.utcnow()
+                        db.commit()
+                finally:
+                    db.close()
+
+            return {"video_url": video_url, "file_path": output_path, "runway_job_id": job_id}
 
         if status == "FAILED":
+            # Update status to failed
+            if video_id:
+                db = SessionLocal()
+                try:
+                    video = db.query(Video).filter(Video.id == video_id).first()
+                    if video:
+                        video.status = "failed"
+                        video.updated_at = datetime.utcnow()
+                        db.commit()
+                finally:
+                    db.close()
             raise Exception(f"RunwayML video generation failed: {task_status.get('error', task_status)}")
 
         time.sleep(5)
         attempts += 1
+
+    # Update status to failed on timeout
+    if video_id:
+        db = SessionLocal()
+        try:
+            video = db.query(Video).filter(Video.id == video_id).first()
+            if video:
+                video.status = "failed"
+                video.updated_at = datetime.utcnow()
+                db.commit()
+        finally:
+            db.close()
 
     raise Exception(f"Video generation timed out after {max_attempts * 5} seconds")
