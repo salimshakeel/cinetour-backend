@@ -17,3 +17,6 @@ RUNWAY_API_URL = os.getenv("RUNWAY_API_URL", "https://api.dev.runwayml.com/v1")
 SECRET_KEY = os.getenv("JWT_SECRET", "supersecretkey")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60  # 1 hour
+
+if not RUNWAY_API_KEY:
+    print("⚠️ WARNING: RUNWAY_API_KEY is not set!")
