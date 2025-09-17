@@ -3,10 +3,11 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
+import os 
 
-DATABASE_URL = "sqlite:///./uploaded_images.db"
+SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL")
 
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+engine = create_engine(SQLALCHEMY_DATABASE_URL)  
 Base = declarative_base()
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -20,14 +21,14 @@ class Order(Base):
     add_ons = Column(String, nullable=True)    # JSON string or comma-separated
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
-    parent_order_id = Column(Integer, ForeignKey("orders.id"), nullable=True)  
-    # 👆 if this is a reorder, link back to original order
+    parent_order_id = Column(Integer, nullable=True)  
+    # 👆 if this is a reorder, link back to original order (FK constraint removed for SQLite compatibility)
 
     # Relationships
     images = relationship("UploadedImage", back_populates="order")
     invoice = relationship("Invoice", back_populates="order", uselist=False)
     user = relationship("User", back_populates="orders")
-    parent_order = relationship("Order", remote_side=[id])
+    # parent_order = relationship("Order", remote_side=[id])  # Commented out for SQLite compatibility
 
 class UploadedImage(Base):
     __tablename__ = "uploaded_images"
@@ -69,7 +70,6 @@ class Feedback(Base):
     new_prompt = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), default=datetime.utcnow)
 
-Base.metadata.create_all(bind=engine)
 
 # Extend User model
 class User(Base):
@@ -100,3 +100,6 @@ class Invoice(Base):
     # Relationships
     order = relationship("Order", back_populates="invoice")
     user = relationship("User", back_populates="invoices")
+
+# Create all tables AFTER all models are defined so FKs resolve correctly
+Base.metadata.create_all(bind=engine)
