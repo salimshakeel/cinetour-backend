@@ -11,7 +11,7 @@ from typing import List, Optional
 
 from runwayml import RunwayML
 
-from app.models.database import SessionLocal, UploadedImage, Video, Feedback
+from app.models.database import SessionLocal, UploadedImage, Video, Feedback, Order
 from app.services.prompt_generator import (
     generate_cinematic_prompt_from_image,
     improve_prompt_with_feedback,
@@ -243,6 +243,7 @@ async def upload_photos(
                 "status": status,
                 "video_url": video_url,
                 "local_path": video_path,
+                "local_url": f"/videos/{os.path.basename(video_path)}" if video_path else None,
             })
 
             if opt_path != src_path:
