@@ -27,6 +27,7 @@ class Order(Base):
     images = relationship("UploadedImage", back_populates="order")
     invoice = relationship("Invoice", back_populates="order", uselist=False)
     user = relationship("User", back_populates="orders")
+    payments = relationship("Payment", back_populates="order")
     # parent_order = relationship("Order", remote_side=[id])  # Commented out for SQLite compatibility
 
 class UploadedImage(Base):
@@ -83,6 +84,7 @@ class User(Base):
     # Relationships
     orders = relationship("Order", back_populates="user")
     invoices = relationship("Invoice", back_populates="user")
+    payments = relationship("Payment", back_populates="user")
 
 class Invoice(Base):
     __tablename__ = "invoices"
@@ -99,6 +101,33 @@ class Invoice(Base):
     # Relationships
     order = relationship("Order", back_populates="invoice")
     user = relationship("User", back_populates="invoices")
+
+class Payment(Base):
+    __tablename__ = "payments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    order_id = Column(Integer, ForeignKey("orders.id"), nullable=True)
+    
+    # Stripe specific fields
+    session_id = Column(String, nullable=False, unique=True)
+    stripe_payment_intent_id = Column(String, nullable=True)
+    amount = Column(Integer, nullable=False)  # Amount in cents
+    currency = Column(String, default="usd")
+    
+    # Payment status
+    status = Column(String, nullable=False, default="pending")  # pending | succeeded | failed | canceled
+    
+    # Metadata
+    payment_metadata = Column(Text, nullable=True)  # JSON string for additional data
+    
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    
+    # Relationships
+    user = relationship("User", back_populates="payments")
+    order = relationship("Order", back_populates="payments")
 
 # Create all tables AFTER all models are defined so FKs resolve correctly
 Base.metadata.create_all(bind=engine)

@@ -16,3 +16,4 @@ pydantic
 email-validator
 PyJWT
 starlette
+stripe

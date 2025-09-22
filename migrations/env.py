@@ -11,6 +11,9 @@ config = context.config
 
 # ✅ Get DB URL from environment
 url = os.getenv("DATABASE_URL")
+if not url:
+    raise ValueError("DATABASE_URL is not set. Make sure it’s available in your environment.")
+config.set_main_option("sqlalchemy.url", url)
 if url:
     config.set_main_option("sqlalchemy.url", url)
 

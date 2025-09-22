@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import upload, Client, admin, auth
+from app.routers import upload, Client, admin, auth, stripe
 from app.config import RUNWAY_API_KEY  # This will load the .env file
 from dotenv import load_dotenv
 import os
@@ -20,6 +20,7 @@ app.include_router(upload.router)
 app.include_router(Client.router, prefix="/api/client")
 app.include_router(admin.router, prefix="/api")
 app.include_router(auth.router, prefix="/auth")
+app.include_router(stripe.router, prefix="/stripe")
 os.makedirs("videos", exist_ok=True)
 app.mount("/videos", StaticFiles(directory="videos"), name="videos")
 os.makedirs("uploaded_images", exist_ok=True)
