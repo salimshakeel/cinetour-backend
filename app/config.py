@@ -18,5 +18,13 @@ SECRET_KEY = os.getenv("JWT_SECRET", "supersecretkey")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60  # 1 hour
 
+# Stripe Configuration
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "").strip()
+STRIPE_PUBLISHABLE_KEY = os.getenv("STRIPE_PUBLISHABLE_KEY", "").strip()
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
+
 if not RUNWAY_API_KEY:
     print("⚠️ WARNING: RUNWAY_API_KEY is not set!")
+
+if not STRIPE_SECRET_KEY:
+    print("⚠️ WARNING: STRIPE_SECRET_KEY is not set!")
