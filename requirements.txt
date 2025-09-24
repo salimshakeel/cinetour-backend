@@ -18,3 +18,4 @@ PyJWT
 starlette
 stripe
 bcrypt
+python-jose[cryptography]
