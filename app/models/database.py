@@ -46,6 +46,14 @@ class UploadedImage(Base):
     # link back to Order
     order = relationship("Order", back_populates="images")
 
+class Admin(Base):
+    __tablename__ = "admins"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, nullable=False)
+    password_hash = Column(String, nullable=False)  # store hashed password
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
 class Video(Base):
     __tablename__ = "videos"
 
