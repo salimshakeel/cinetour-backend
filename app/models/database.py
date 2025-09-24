@@ -4,7 +4,7 @@ from datetime import datetime
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 import os 
-
+from sqlalchemy import Column, LargeBinary
 SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL")
 
 engine = create_engine(SQLALCHEMY_DATABASE_URL)
@@ -35,7 +35,7 @@ class UploadedImage(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     order_id = Column(Integer, ForeignKey("orders.id"), nullable=False)
-
+    content = Column(LargeBinary)
     filename = Column(String, nullable=False)
     prompt = Column(String, nullable=True)
     video_path = Column(String, nullable=True)

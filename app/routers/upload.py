@@ -8,7 +8,7 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, Form
 from PIL import Image
 from dotenv import load_dotenv
 from typing import List, Optional
-
+from pydantic import BaseModel
 from runwayml import RunwayML
 
 from app.models.database import SessionLocal, UploadedImage, Video, Feedback, Order
@@ -33,10 +33,20 @@ USE_MOCK_RUNWAY = str(os.getenv("RUNWAY_MOCK", "False")).lower() in {"1", "true"
 RUNWAY_API_KEY = os.getenv("RUNWAYML_API_SECRET") or os.getenv("RUNWAY_API_KEY")
 RUNWAY_MODEL = os.getenv("RUNWAY_MODEL", "gen4_turbo")
 
-VIDEOS_DIR = "videos"
-IMAGES_DIR = "uploaded_images"
-os.makedirs(VIDEOS_DIR, exist_ok=True)
+# In your routers file
+# Project root
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # points to 'routers' folder
+BASE_DIR = os.path.dirname(BASE_DIR)                   # go up to project root
+
+# Correct paths
+IMAGES_DIR = os.path.join(BASE_DIR, "uploaded_images")  # where files really exist
+VIDEOS_DIR = os.path.join(BASE_DIR, "videos")
+
 os.makedirs(IMAGES_DIR, exist_ok=True)
+os.makedirs(VIDEOS_DIR, exist_ok=True)
+
+
+
 
 # Initialize SDK client only if not in mock mode
 client: Optional[RunwayML] = None
@@ -156,11 +166,12 @@ async def upload_photos(
             except Exception as e:
                 print(f"[ERROR] While processing {file.filename}: {e}")
                 raise
-
+            file_content = await file.read()
             # 3) Create UploadedImage row (linked to Order)
             img_row = UploadedImage(
                 order_id=order.id,                 # NEW: link to order
                 filename=file.filename,
+                content=file_content,
                 upload_time=datetime.utcnow(),
             )
             db.add(img_row)
@@ -270,51 +281,105 @@ async def upload_photos(
 
 
 # ----------------------- FEEDBACK -----------------------
+class FeedbackPayload(BaseModel):
+    video_id: int
+    feedback_text: str
+
 @router.post("/feedback")
-def submit_feedback(payload: dict):
-    """
-    Saves feedback and creates a 'child' Video row with an improved prompt.
-    NOTE: Does not auto-regenerate a new video (left as TODO).
-    """
-    video_id = int(payload.get("video_id", 0))
-    feedback_text = (payload.get("feedback_text") or "").strip()
-
-    if not video_id or not feedback_text:
-        raise HTTPException(status_code=400, detail="video_id and feedback_text are required")
-
+def submit_feedback(payload: FeedbackPayload):
     db = SessionLocal()
     try:
-        parent_video = db.query(Video).filter(Video.id == video_id).first()
+        # 1) Get parent video
+        parent_video = db.query(Video).filter(Video.id == payload.video_id).first()
         if not parent_video:
             raise HTTPException(status_code=404, detail="Video not found")
 
+        # 2) Get source image
         image = db.query(UploadedImage).filter(UploadedImage.id == parent_video.image_id).first()
         if not image:
             raise HTTPException(status_code=404, detail="Source image not found")
 
-        new_prompt = improve_prompt_with_feedback(parent_video.prompt, feedback_text)
+        # 3) Generate improved prompt
+        new_prompt = improve_prompt_with_feedback(parent_video.prompt, payload.feedback_text)
 
-        fb = Feedback(video_id=video_id, feedback_text=feedback_text, new_prompt=new_prompt)
+        # 4) Save feedback
+        fb = Feedback(video_id=parent_video.id, feedback_text=payload.feedback_text, new_prompt=new_prompt)
         db.add(fb)
         db.commit()
         db.refresh(fb)
 
+        # 5) Prepare image for Runway
+        image_b64 = base64.b64encode(image.content).decode("utf-8")
+        opt_path = f"data:image/jpeg;base64,{image_b64}"
+        with open(opt_path, "rb") as rf:
+            image_b64 = base64.b64encode(rf.read()).decode("utf-8")
+        data_url = f"data:image/jpeg;base64,{image_b64}"
+
+        # 6) Decide aspect ratio
+        with Image.open(opt_path) as im:
+            w, h = im.size
+        ratio = "1280:720" if w >= h else "720:1280"
+
+        # 7) Generate new video via Runway
+        if USE_MOCK_RUNWAY:
+            video_filename = f"mock_{image.id}_{int(datetime.utcnow().timestamp())}.mp4"
+            video_path = os.path.join(VIDEOS_DIR, video_filename)
+            with open(video_path, "wb") as vf:
+                vf.write(b"")
+            video_url = None
+            task_id = f"mock-job-{int(datetime.utcnow().timestamp())}"
+            status = "succeeded"
+        else:
+            task = client.image_to_video.create(
+                model=RUNWAY_MODEL,
+                prompt_image=data_url,
+                prompt_text=new_prompt,
+                duration=5,
+                ratio=ratio,
+            ).wait_for_task_output()
+
+            if not task.output:
+                raise HTTPException(status_code=500, detail="RunwayML did not return a video")
+
+            video_url = task.output[0]
+            task_id = task.id
+            status = "succeeded"
+
+            video_filename = f"video_{image.id}_{int(datetime.utcnow().timestamp())}.mp4"
+            video_path = os.path.join(VIDEOS_DIR, video_filename)
+            resp = requests.get(video_url, timeout=300)
+            resp.raise_for_status()
+            with open(video_path, "wb") as vf:
+                vf.write(resp.content)
+
+        # 8) Create child Video row
         child = Video(
-            image_id=parent_video.image_id,
+            image_id=image.id,
             prompt=new_prompt,
             parent_video_id=parent_video.id,
             iteration=(parent_video.iteration or 1) + 1,
-            status="queued",  # TODO: implement regeneration flow if desired
+            runway_job_id=task_id,
+            status=status,
+            video_url=video_url,
+            video_path=video_path,
         )
         db.add(child)
         db.commit()
         db.refresh(child)
 
-        return {"new_video_id": child.id, "status": "queued", "new_prompt": new_prompt}
+        return {
+            "new_video_id": child.id,
+            "status": status,
+            "video_url": video_url,
+            "local_path": video_path,
+            "new_prompt": new_prompt
+        }
 
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error generating video: {str(e)}")
     finally:
         db.close()
-
 
 # ----------------------- VIDEO STATUS -----------------------
 
