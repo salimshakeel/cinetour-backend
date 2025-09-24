@@ -19,3 +19,4 @@ starlette
 stripe
 bcrypt
 python-jose[cryptography]
+passlib[bcrypt]
