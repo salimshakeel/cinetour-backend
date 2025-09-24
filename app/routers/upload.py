@@ -27,7 +27,7 @@ router = APIRouter()
 load_dotenv()
 
 # Mock mode via env: RUNWAY_MOCK=true|1|yes
-USE_MOCK_RUNWAY = str(os.getenv("RUNWAY_MOCK", "true")).lower() in {"1", "true", "yes"}
+USE_MOCK_RUNWAY = str(os.getenv("RUNWAY_MOCK", "False")).lower() in {"1", "true", "yes"}
 
 # API key for SDK (supports either env var name)
 RUNWAY_API_KEY = os.getenv("RUNWAYML_API_SECRET") or os.getenv("RUNWAY_API_KEY")
@@ -197,6 +197,7 @@ async def upload_photos(
                     model=RUNWAY_MODEL,
                     prompt_image=data_url,
                     prompt_text=prompt_text,
+                    duration=5,
                     ratio=ratio,
                 ).wait_for_task_output()
 
