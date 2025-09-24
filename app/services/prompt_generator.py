@@ -39,19 +39,35 @@ def generate_cinematic_prompt_from_image(image_path: str) -> str:
             model="gpt-4o",  # ✅ vision model
             temperature=0.8,
             max_tokens=120,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a film director. Given an image, write a concise (<= 2 sentences) cinematic video prompt with mood, lighting, and camera movement suitable for an image-to-video model.",
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "Analyze this image and output a short cinematic video prompt."},
-                        {"type": "image_url", "image_url": {"url": image_data_url}},
-                    ],
-                },
-            ],
+            messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are an award-winning film director creating cinematic real estate ads. "
+                    "Given an image, write a detailed cinematic video prompt for runwayml to generate a video"
+                    "Rules: "
+                    "1. Always describe mood and lighting. "
+                    "2. Strong Camera motion must use at least TWO distinct stages (e.g., orbit, arc, spiral, pull-back, tilt, reveal, fly-over). "
+                    "   Never default to only zooming. "
+                    "3. For EXTERIOR: always use drone shots with varied movements (orbit, spiral, fly-over, pull-back, dive, sweeping arc). "
+                    "   Randomize the motion type so no two outputs feel repetitive. "
+                    "4. For INTERIOR: use steadicam or dolly with smooth pans, tilts, and pivots that reveal depth and flow. "
+                    "5. Every visible element must show natural animation — fans spin, curtains ripple, trees sway, chairs shift subtly, reflections shimmer, water ripples, clouds drift. "
+                    "6. End every prompt by explicitly describing at least two of these animations, so the scene feels alive and realistic. "
+                    "7. The overall tone must feel like a luxury property trailer — immersive, dynamic, and cinematic. "
+                )
+
+
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Analyze this image and output the cinematic video prompt."},
+                    {"type": "image_url", "image_url": {"url": image_data_url}},
+                ],
+            },
+            ]
+
         )
         return (resp.choices[0].message.content or "").strip()
 
