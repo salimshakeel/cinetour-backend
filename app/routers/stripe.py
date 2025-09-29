@@ -91,7 +91,7 @@ async def create_checkout_session(
                 'quantity': 1,
             }],
             mode='payment',
-            success_url=request.success_url,
+            success_url="https://qunatum-tour.onrender.com/api/client/orders/new",
             cancel_url=request.cancel_url,
             metadata=metadata,
             customer_email=user.email if user.email else None,
