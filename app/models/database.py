@@ -100,7 +100,7 @@ class Invoice(Base):
     id = Column(Integer, primary_key=True, index=True)
     order_id = Column(Integer, ForeignKey("orders.id"), nullable=False)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-
+    is_paid = Column(Boolean, default=False)
     amount = Column(Integer, nullable=False)
     status = Column(String, default="unpaid")  # unpaid | paid | refunded
     due_date = Column(DateTime, nullable=True)
