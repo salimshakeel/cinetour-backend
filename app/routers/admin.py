@@ -61,14 +61,17 @@ def get_order_status():
             images = db.query(UploadedImage).filter(UploadedImage.order_id == order.id).all()
 
             # Get latest video per image (completed output)
+            # latest video per image subquery
             latest_video_subq = (
                 db.query(
-                    Video.image_id.label("image_id"),
+                    Video.image_id,
                     func.max(Video.iteration).label("max_iter")
                 )
                 .group_by(Video.image_id)
                 .subquery()
             )
+
+            # get latest videos for this order
             latest_videos = (
                 db.query(Video)
                 .join(
@@ -76,7 +79,8 @@ def get_order_status():
                     (Video.image_id == latest_video_subq.c.image_id) &
                     (Video.iteration == latest_video_subq.c.max_iter),
                 )
-                .filter(Video.order_id == order.id)
+                .join(UploadedImage, UploadedImage.id == Video.image_id)  # ✅ join UploadedImage
+                .filter(UploadedImage.order_id == order.id)                # ✅ filter by UploadedImage.order_id
                 .all()
             )
 
