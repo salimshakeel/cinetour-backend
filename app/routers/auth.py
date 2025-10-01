@@ -40,6 +40,7 @@ def hash_password(password: str, salt: str) -> str:
 
 
 class SignupPayload(BaseModel):
+    name: str
     email: EmailStr
     password: str
 
@@ -52,6 +53,7 @@ class SigninPayload(BaseModel):
 def serialize_user(u: User) -> dict:
     return {
         "id": u.id,
+        "name": u.name, 
         "email": u.email,
         "is_guest": bool(u.is_guest),
         "created_at": u.created_at,
@@ -82,6 +84,7 @@ def signup(payload: SignupPayload):
 
         if existing and existing.is_guest:
             # upgrade guest -> full user
+        
             existing.email = payload.email
             existing.password_hash = pw_hash
             existing.is_guest = False
@@ -97,6 +100,7 @@ def signup(payload: SignupPayload):
 
         # new user
         user = User(
+            name=payload.name, 
             email=payload.email,
             password_hash=pw_hash,
             is_guest=False,
@@ -121,7 +125,12 @@ def signup(payload: SignupPayload):
 def signin(payload: SigninPayload):
     db = SessionLocal()
     try:
-        user = db.query(User).filter(User.email == payload.email).first()
+        # 🔑 only look for real users (is_guest = False)
+        user = db.query(User).filter(
+            User.email == payload.email,
+            User.is_guest == False
+        ).first()
+
         if not user or not user.password_hash:
             raise HTTPException(status_code=401, detail="Invalid credentials")
 
@@ -135,10 +144,13 @@ def signin(payload: SigninPayload):
             expires_delta=access_token_expires,
         )
 
-        return {"user": serialize_user(user), "access_token": token, "token_type": "bearer"}
+        return {
+            "user": serialize_user(user),
+            "access_token": token,
+            "token_type": "bearer"
+        }
     finally:
         db.close()
-
 
 # ------------------- GUEST -------------------
 @router.post("/guest")

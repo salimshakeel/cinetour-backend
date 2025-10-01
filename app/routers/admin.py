@@ -3,7 +3,7 @@ from datetime import datetime
 import os
 import shutil
 import time
-from app.models.database import SessionLocal, Order, UploadedImage, Video, User
+from app.models.database import SessionLocal, Order, UploadedImage, Video, User ,Notification
 from sqlalchemy.sql import func
 from app.services.runway_service import generate_video
 from datetime import timedelta
@@ -399,88 +399,83 @@ def admin_logs_status():
 # ----------------------- ADMIN: NOTIFICATIONS -----------------------
 @router.get("/admin/notifications", tags=["Admin Portal"])
 def admin_notifications():
-    """Derived notifications for admin UI (user activity, video jobs, system status)."""
+    """Unified admin notifications for UI with user emails via relationship."""
     db = SessionLocal()
     try:
         notifications = []
-        
-        # Video processing notifications
+
+        # 1️⃣ Video processing notifications
         failed_count = db.query(Video).filter(Video.status == "failed").count()
         processing_count = db.query(Video).filter(Video.status == "processing").count()
-        
+        succeeded_videos = (
+            db.query(Video)
+            .filter(Video.status == "succeeded")
+            .order_by(Video.updated_at.desc())
+            .limit(5)
+            .all()
+        )
+
         if failed_count:
             notifications.append({
-                "type": "error", 
+                "type": "video_failed",
                 "message": f"{failed_count} video jobs failed. Review and retry.",
                 "category": "video_processing"
             })
+
         if processing_count:
             notifications.append({
-                "type": "info", 
+                "type": "video_processing",
                 "message": f"{processing_count} video jobs currently processing.",
                 "category": "video_processing"
             })
 
-        # User activity notifications (recent sign-ins)
-        recent_users = (
-            db.query(User)
-            .filter(User.created_at >= datetime.utcnow() - timedelta(hours=24))
-            .order_by(User.created_at.desc())
-            .limit(5)
-            .all()
-        )
-        
-        for user in recent_users:
-            if user.is_guest:
-                notifications.append({
-                    "type": "info",
-                    "message": f"New guest user #{user.id} joined",
-                    "category": "user_activity",
-                    "user_id": user.id,
-                    "timestamp": user.created_at.isoformat()
-                })
-            else:
-                notifications.append({
-                    "type": "success",
-                    "message": f"New user registered: {user.email}",
-                    "category": "user_activity",
-                    "user_id": user.id,
-                    "email": user.email,
-                    "timestamp": user.created_at.isoformat()
-                })
+        for v in succeeded_videos:
+            user_email = "Guest"
+            user_id = None
 
-        # Recent video completions
-        recent_success = (
-            db.query(Video)
-            .filter(Video.status == "succeeded")
-            .order_by(Video.id.desc())
-            .limit(3)
-            .all()
-        )
-        
-        for v in recent_success:
+            if v.image and v.image.order and v.image.order.user:
+                user_email = v.image.order.user.email or "Guest"
+                user_id = v.image.order.user.id
+
             notifications.append({
-                "type": "success",
-                "message": f"Video #{v.id} (image {v.image_id}) completed.",
-                "category": "video_processing",
+                "type": "video_completed",
+                "message": f"Video #{v.id} for order #{v.image.order_id} completed.",
+                "video_id": v.id,
                 "video_path": v.video_path,
-                "video_id": v.id
+                "image_id": v.image_id,
+                "order_id": v.image.order_id,
+                "user_id": v.image.order.user_id,
+                "user_email": user_email,
+                "category": "video_processing"
             })
 
-        # System health check
+        # 2️⃣ Notifications from the Notification table (new users, etc.)
+        recent_notifications = db.query(Notification).order_by(Notification.created_at.desc()).limit(20).all()
+        for notif in recent_notifications:
+            notifications.append({
+                "type": notif.type,
+                "message": notif.message,
+                "user_id": notif.user_id,
+                "user_email": notif.user.email if notif.user else "Guest",
+                "is_read": notif.is_read,
+                "created_at": notif.created_at.isoformat(),
+                "category": "system_notifications"
+            })
+
+        # 3️⃣ System stats
         total_users = db.query(User).count()
         total_orders = db.query(Order).count()
         total_videos = db.query(Video).count()
-        
+
         notifications.append({
-            "type": "info",
+            "type": "system_stats",
             "message": f"System stats: {total_users} users, {total_orders} orders, {total_videos} videos",
-            "category": "system_stats",
             "stats": {
                 "users": total_users,
                 "orders": total_orders,
                 "videos": total_videos
-            }
+            },
+            "category": "system_stats"
         })
 
         return {"notifications": notifications}

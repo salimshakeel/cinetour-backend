@@ -45,7 +45,7 @@ class UploadedImage(Base):
 
     # link back to Order
     order = relationship("Order", back_populates="images")
-
+    videos = relationship("Video", back_populates="image")    
 class Admin(Base):
     __tablename__ = "admins"
 
@@ -68,7 +68,9 @@ class Video(Base):
     iteration = Column(Integer, nullable=False, default=1)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), default=datetime.utcnow)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), default=datetime.utcnow)
-
+    image = relationship("UploadedImage", back_populates="videos")
+    
+    
 class Feedback(Base):
     __tablename__ = "feedback"
 
@@ -82,13 +84,14 @@ class Feedback(Base):
 # Extend User model
 class User(Base):
     __tablename__ = "users"
-
+    
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String, unique=True, nullable=True)   # nullable if guest
-    password_hash = Column(String, nullable=True)        # null for guest
+    password_hash = Column(String, nullable=True) 
+    name = Column(String, nullable=True) # null for guest
     is_guest = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
-
+    notifications = relationship("Notification", back_populates="user")
     # Relationships
     orders = relationship("Order", back_populates="user")
     invoices = relationship("Invoice", back_populates="user")
@@ -139,3 +142,15 @@ class Payment(Base):
 
 # Create all tables AFTER all models are defined so FKs resolve correctly
 Base.metadata.create_all(bind=engine)
+
+class Notification(Base):
+    __tablename__ = "notifications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # link to user if needed
+    type = Column(String, nullable=False)   # e.g. "video_created", "new_user"
+    message = Column(String, nullable=False)
+    is_read = Column(Boolean, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    user = relationship("User", back_populates="notifications")

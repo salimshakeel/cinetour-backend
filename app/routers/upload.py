@@ -5,13 +5,14 @@ import tempfile
 from datetime import datetime
 import requests
 from fastapi import APIRouter, UploadFile, File, HTTPException, Form
+from sqlalchemy.orm import Session
 from PIL import Image
 from dotenv import load_dotenv
 from typing import List, Optional
 from pydantic import BaseModel
 from runwayml import RunwayML
-
-from app.models.database import SessionLocal, UploadedImage, Video, Feedback, Order
+from fastapi import BackgroundTasks
+from app.models.database import SessionLocal, UploadedImage, Video, Feedback, Order, Notification
 from app.services.prompt_generator import (
     generate_cinematic_prompt_from_image,
     improve_prompt_with_feedback,
@@ -95,82 +96,37 @@ def runway_status():
 
 
 # ----------------------- UPLOAD (MULTI) -----------------------
-
-@router.post("/upload")
-async def upload_photos(
-    package: str = Form(...),                    # required
-    add_ons: Optional[str] = Form(None),         # optional (JSON string from frontend)
-    files: List[UploadFile] = File(...)          # required
-):
-    # Debug print incoming request
-    print(f"[DEBUG] Package received: {package}")
-    print(f"[DEBUG] Raw add_ons received: {add_ons}")
-    print(f"[DEBUG] Number of files received: {len(files)}")
-    print(f"[DEBUG] File names: {[file.filename for file in files]}")
-
-    # Validate package
-    if package not in PACKAGE_LIMITS:
-        print(f"[ERROR] Invalid package: {package}")
-        raise HTTPException(status_code=400, detail="Invalid package selected")
-
-    # Parse add_ons if provided
-    add_ons_list = []
-    if add_ons:
-        import json
-        try:
-            add_ons_list = json.loads(add_ons)
-            print(f"[DEBUG] Parsed add_ons: {add_ons_list}")
-        except Exception as e:
-            print(f"[ERROR] Failed to parse add_ons: {e}")
-            raise HTTPException(status_code=400, detail="Invalid add_ons format")
-
-    # Validate file count
-    min_files, max_files = PACKAGE_LIMITS[package]
-    if not (min_files <= len(files) <= max_files):
-        raise HTTPException(
-            status_code=400,
-            detail=f"{package} allows {min_files}-{max_files} photos"
-        )
-
-    print("[DEBUG] Upload validation successful")
-
+def process_videos_for_order(order_id: int, file_paths: List[str]):
+    print(f"[BG] Start processing order {order_id} with {len(file_paths)} files")
     db = SessionLocal()
-    results = []
-
     try:
-        # 1) Create Order (NEW)
-        order = Order(
-            package=package,
-            add_ons=",".join(add_ons_list) if add_ons_list else None,
-        )
-        db.add(order)
-        db.commit()
-        db.refresh(order)
-        print(f"[DEBUG] Created Order ID: {order.id}")
+        order = db.query(Order).filter(Order.id == order_id).first()
+        if not order:
+            print(f"[ERROR] Order {order_id} not found")
+            return
 
-        # 2) Process each file
-        for file in files:
-            src_path = os.path.join(IMAGES_DIR, file.filename)
+        for src_path in file_paths:  # now we get string paths, not UploadFile
+            filename = os.path.basename(src_path)
 
-            print(f"📂 Processing: {file.filename}")
             try:
-                print(f"[STEP] Saving file → {src_path}")
-                with open(src_path, "wb") as f:
-                    shutil.copyfileobj(file.file, f)
-                print(f"[OK] Saved file {file.filename}")
+                print(f"[STEP] Using saved file → {src_path}")
 
-                print("[STEP] Opening image with PIL")
+                # Image dimensions
                 with Image.open(src_path) as im:
                     w, h = im.size
                 print(f"[OK] Image size: {w}x{h}")
             except Exception as e:
-                print(f"[ERROR] While processing {file.filename}: {e}")
-                raise
-            file_content = await file.read()
-            # 3) Create UploadedImage row (linked to Order)
+                print(f"[ERROR] While processing {filename}: {e}")
+                continue
+
+            # Read file content (binary)
+            with open(src_path, "rb") as f:
+                file_content = f.read()
+
+            # Create UploadedImage row
             img_row = UploadedImage(
-                order_id=order.id,                 # NEW: link to order
-                filename=file.filename,
+                order_id=order.id,
+                filename=filename,
                 content=file_content,
                 upload_time=datetime.utcnow(),
             )
@@ -178,55 +134,56 @@ async def upload_photos(
             db.commit()
             db.refresh(img_row)
 
-            # 4) Generate prompt
+            print(f"[STEP] Generating video for {filename}")
+            # Generate cinematic prompt
             prompt_text = generate_cinematic_prompt_from_image(src_path)
             img_row.prompt = prompt_text
             db.commit()
 
-            # 5) Decide aspect ratio
-            with Image.open(src_path) as im:
-                w, h = im.size
+            # Decide aspect ratio
             ratio = "1280:720" if w >= h else "720:1280"
 
-            # 6) Optimize → base64 data URL
+            # Optimize → base64 data URL
             opt_path = optimize_image_for_runway(src_path)
             with open(opt_path, "rb") as rf:
                 image_b64 = base64.b64encode(rf.read()).decode("utf-8")
             data_url = f"data:image/jpeg;base64,{image_b64}"
 
-            # 7) Get video (SDK or mock)
+            # RunwayML video generation
             if USE_MOCK_RUNWAY:
                 video_filename = f"mock_{img_row.id}.mp4"
                 video_path = os.path.join(VIDEOS_DIR, video_filename)
                 with open(video_path, "wb") as vf:
-                    vf.write(b"")
-                video_url = None
-                task_id = f"mock-job-{int(datetime.utcnow().timestamp())}"
-                status = "succeeded"
+                    vf.write(b"")  # empty mock file
+                video_url, task_id, status = None, f"mock-job-{int(datetime.utcnow().timestamp())}", "succeeded"
             else:
-                task = client.image_to_video.create(
-                    model=RUNWAY_MODEL,
-                    prompt_image=data_url,
-                    prompt_text=prompt_text,
-                    duration=5,
-                    ratio=ratio,
-                ).wait_for_task_output()
+                try:
+                    task = client.image_to_video.create(
+                        model=RUNWAY_MODEL,
+                        prompt_image=data_url,
+                        prompt_text=prompt_text,
+                        duration=5,
+                        ratio=ratio,
+                    ).wait_for_task_output()
 
-                if not task.output:
-                    raise HTTPException(status_code=500, detail="RunwayML did not return a video")
+                    if not task.output:
+                        raise Exception("RunwayML did not return a video")
 
-                video_url = task.output[0]
-                task_id = task.id
-                status = "succeeded"
+                    video_url = task.output[0]
+                    task_id = task.id
+                    status = "succeeded"
 
-                video_filename = f"video_{img_row.id}.mp4"
-                video_path = os.path.join(VIDEOS_DIR, video_filename)
-                resp = requests.get(video_url, timeout=300)
-                resp.raise_for_status()
-                with open(video_path, "wb") as vf:
-                    vf.write(resp.content)
+                    video_filename = f"video_{img_row.id}.mp4"
+                    video_path = os.path.join(VIDEOS_DIR, video_filename)
+                    resp = requests.get(video_url, timeout=300)
+                    resp.raise_for_status()
+                    with open(video_path, "wb") as vf:
+                        vf.write(resp.content)
+                except Exception as e:
+                    print(f"[ERROR] RunwayML generation failed: {e}")
+                    status, video_url, video_path, task_id = "failed", None, None, None
 
-            # 8) Save Video row
+            # Save Video row
             video_row = Video(
                 image_id=img_row.id,
                 prompt=prompt_text,
@@ -240,23 +197,11 @@ async def upload_photos(
             db.commit()
             db.refresh(video_row)
 
-            # 9) Update UploadedImage with video info
+            # Update UploadedImage with video info
             img_row.video_path = video_path
             img_row.video_url = video_url
             img_row.video_generated_at = datetime.utcnow()
             db.commit()
-
-            # 10) Response item
-            results.append({
-                "image_id": img_row.id,
-                "filename": file.filename,
-                "prompt": prompt_text,
-                "video_id": video_row.id,
-                "status": status,
-                "video_url": video_url,
-                "local_path": video_path,
-                "local_url": f"/videos/{os.path.basename(video_path)}" if video_path else None,
-            })
 
             if opt_path != src_path:
                 try:
@@ -264,17 +209,71 @@ async def upload_photos(
                 except Exception:
                     pass
 
+        print(f"[OK] Finished background processing for order {order_id}")
+    finally:
+        db.close()
+        
+    def create_notification(db: Session, user_id: int, type_: str, message: str):
+            notif = Notification(
+                user_id=user_id,
+                type=type_,
+                message=message
+            )
+            db.add(notif)
+            db.commit()
+            db.refresh(notif)
+            return notif
+
+@router.post("/upload")
+async def upload_photos(
+    background_tasks: BackgroundTasks,
+    package: str = Form(...),
+    add_ons: Optional[str] = Form(None),
+    files: List[UploadFile] = File(...)
+):
+    # if package not in PACKAGE_LIMITS:
+    #     raise HTTPException(status_code=400, detail="Invalid package selected")
+
+    # # ✅ Validate number of files
+    # min_files, max_files = PACKAGE_LIMITS[package]
+    # if not (min_files <= len(files) <= max_files):
+    #     raise HTTPException(
+    #         status_code=400,
+    #         detail=f"{package} allows {min_files}-{max_files} photos"
+    #     )
+    db = SessionLocal()
+    try:
+        # create order
+        order = Order(
+            package=package,
+            add_ons=add_ons
+        )
+        db.add(order)
+        db.commit()
+        db.refresh(order)
+
+        saved_files = []
+        for file in files:
+            dst_path = os.path.join(IMAGES_DIR, file.filename)
+            print(f"[STEP] Saving file → {dst_path}")
+            try:
+                with open(dst_path, "wb") as f:
+                    shutil.copyfileobj(file.file, f)   # save immediately
+                print(f"[OK] Saved file {file.filename}")
+                saved_files.append(dst_path)
+            except Exception as e:
+                print(f"[ERROR] Could not save {file.filename}: {e}")
+                raise HTTPException(status_code=500, detail=f"Failed to save {file.filename}")
+
+        # ✅ Pass order.id + saved file paths (not UploadFile objects!)
+        background_tasks.add_task(process_videos_for_order, order.id, saved_files)
+
         return {
             "status": "success",
-            "order_id": order.id,    # NEW
+            "order_id": order.id,
             "package": order.package,
             "add_ons": order.add_ons,
-            "results": results
         }
-
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Error processing files: {str(e)}")
 
     finally:
         db.close()
