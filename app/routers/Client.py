@@ -44,7 +44,7 @@ def get_download_center(user_id: int, db: Session = Depends(get_db)):
                 (Video.image_id == latest_video_subq.c.image_id) &
                 (Video.iteration == latest_video_subq.c.max_iter),
             )
-            .filter(Video.order_id == order.id, Video.status == "completed")
+            .filter(Video.order_id == order.id, Video.status.in_(["completed", "succeeded"]))
             .all()
         )
 
