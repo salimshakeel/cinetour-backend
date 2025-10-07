@@ -34,9 +34,9 @@ app.mount("/uploaded_images", StaticFiles(directory="uploaded_images"), name="up
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://cinetours.vercel.app",    # frontend
-        "https://qunatum-tour.onrender.com",  # backend
-        "http://localhost:3000",           # local dev
+        "https://cinetours.vercel.app",      # frontend
+        "https://quanatum-tour.onrender.com",  # ✅ correct backend domain
+        "http://localhost:3000",             # local dev
     ],
     allow_credentials=True,
     allow_methods=["*"],
