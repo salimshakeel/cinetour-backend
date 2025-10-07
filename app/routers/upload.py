@@ -4,6 +4,7 @@ import shutil
 import tempfile
 from datetime import datetime
 import requests
+import dropbox
 from fastapi import APIRouter, UploadFile, File, HTTPException, Form
 from sqlalchemy.orm import Session
 from PIL import Image
@@ -93,25 +94,57 @@ def runway_status():
         "videos_dir": os.path.abspath(VIDEOS_DIR),
         "images_dir": os.path.abspath(IMAGES_DIR),
     }
+    
+# ----------------------Notification--------------------
 
+def create_notification(db: Session, user_id: int, type_: str, message: str):
+    notif = Notification(
+        user_id=user_id,
+        type=type_,
+        message=message
+    )
+    db.add(notif)
+    db.commit()
+    db.refresh(notif)
+    return notif
+def upload_video_to_dropbox(video_url: str, dropbox_path: str) -> bool:
+    """
+    Uploads a video directly from a URL to Dropbox without saving locally.
+    Initializes Dropbox client inside the function.
+    """
+    try:
+        print(f"[DEBUG] Initializing Dropbox client")
+        DROPBOX_TOKEN = os.getenv("DROPBOX_TOKEN")
+        if not DROPBOX_TOKEN:
+            raise Exception("DROPBOX_TOKEN not found in environment variables")
+        dbx = dropbox.Dropbox(DROPBOX_TOKEN)
 
+        print(f"[DEBUG] Downloading video from URL → {video_url}")
+        resp = requests.get(video_url, timeout=300)
+        resp.raise_for_status()
+        video_bytes = resp.content
+
+        print(f"[DEBUG] Uploading video to Dropbox → {dropbox_path}")
+        dbx.files_upload(video_bytes, dropbox_path, mode=dropbox.files.WriteMode.overwrite)
+        print(f"[OK] Uploaded to Dropbox → {dropbox_path}")
+        return True
+    except Exception as e:
+        print(f"[ERROR] Dropbox upload failed: {e}")
+        return False
 # ----------------------- UPLOAD (MULTI) -----------------------
-def process_videos_for_order(order_id: int, file_paths: List[str]):
+def process_videos_for_order(order_id: int, file_paths: list):
     print(f"[BG] Start processing order {order_id} with {len(file_paths)} files")
-    db = SessionLocal()
+    db: Session = SessionLocal()
     try:
         order = db.query(Order).filter(Order.id == order_id).first()
         if not order:
             print(f"[ERROR] Order {order_id} not found")
             return
 
-        for src_path in file_paths:  # now we get string paths, not UploadFile
+        for src_path in file_paths:
             filename = os.path.basename(src_path)
-
             try:
-                print(f"[STEP] Using saved file → {src_path}")
-
-                # Image dimensions
+                print(f"[STEP] Opening image → {src_path}")
                 with Image.open(src_path) as im:
                     w, h = im.size
                 print(f"[OK] Image size: {w}x{h}")
@@ -119,7 +152,6 @@ def process_videos_for_order(order_id: int, file_paths: List[str]):
                 print(f"[ERROR] While processing {filename}: {e}")
                 continue
 
-            # Read file content (binary)
             with open(src_path, "rb") as f:
                 file_content = f.read()
 
@@ -134,16 +166,12 @@ def process_videos_for_order(order_id: int, file_paths: List[str]):
             db.commit()
             db.refresh(img_row)
 
-            print(f"[STEP] Generating video for {filename}")
-            # Generate cinematic prompt
+            print(f"[STEP] Generating cinematic prompt for {filename}")
             prompt_text = generate_cinematic_prompt_from_image(src_path)
             img_row.prompt = prompt_text
             db.commit()
 
-            # Decide aspect ratio
             ratio = "1280:720" if w >= h else "720:1280"
-
-            # Optimize → base64 data URL
             opt_path = optimize_image_for_runway(src_path)
             with open(opt_path, "rb") as rf:
                 image_b64 = base64.b64encode(rf.read()).decode("utf-8")
@@ -152,12 +180,10 @@ def process_videos_for_order(order_id: int, file_paths: List[str]):
             # RunwayML video generation
             if USE_MOCK_RUNWAY:
                 video_filename = f"mock_{img_row.id}.mp4"
-                video_path = os.path.join(VIDEOS_DIR, video_filename)
-                with open(video_path, "wb") as vf:
-                    vf.write(b"")  # empty mock file
                 video_url, task_id, status = None, f"mock-job-{int(datetime.utcnow().timestamp())}", "succeeded"
             else:
                 try:
+                    print(f"[STEP] Sending request to RunwayML for {filename}")
                     task = client.image_to_video.create(
                         model=RUNWAY_MODEL,
                         prompt_image=data_url,
@@ -172,16 +198,18 @@ def process_videos_for_order(order_id: int, file_paths: List[str]):
                     video_url = task.output[0]
                     task_id = task.id
                     status = "succeeded"
+                    dropbox_path = f"/videos/video_{img_row.id}.mp4"
+                    upload_success = upload_video_to_dropbox(video_url, dropbox_path)
 
-                    video_filename = f"video_{img_row.id}.mp4"
-                    video_path = os.path.join(VIDEOS_DIR, video_filename)
-                    resp = requests.get(video_url, timeout=300)
-                    resp.raise_for_status()
-                    with open(video_path, "wb") as vf:
-                        vf.write(resp.content)
+                    if upload_success:
+                        video_url = f"dropbox://{dropbox_path}"
+                    else:
+                        video_url = None
+                        status = "failed"
+
                 except Exception as e:
                     print(f"[ERROR] RunwayML generation failed: {e}")
-                    status, video_url, video_path, task_id = "failed", None, None, None
+                    status, video_url, task_id = "failed", None, None
 
             # Save Video row
             video_row = Video(
@@ -190,7 +218,6 @@ def process_videos_for_order(order_id: int, file_paths: List[str]):
                 runway_job_id=task_id,
                 status=status,
                 video_url=video_url,
-                video_path=video_path,
                 iteration=1,
             )
             db.add(video_row)
@@ -198,10 +225,17 @@ def process_videos_for_order(order_id: int, file_paths: List[str]):
             db.refresh(video_row)
 
             # Update UploadedImage with video info
-            img_row.video_path = video_path
             img_row.video_url = video_url
             img_row.video_generated_at = datetime.utcnow()
             db.commit()
+
+            if video_row.status == "succeeded":
+                create_notification(
+                    db=db,
+                    user_id=order.user_id,
+                    type_="video_created",
+                    message=f"Video #{video_row.id} created for Order #{order.id} ({filename})"
+                )
 
             if opt_path != src_path:
                 try:
@@ -213,16 +247,6 @@ def process_videos_for_order(order_id: int, file_paths: List[str]):
     finally:
         db.close()
         
-    def create_notification(db: Session, user_id: int, type_: str, message: str):
-            notif = Notification(
-                user_id=user_id,
-                type=type_,
-                message=message
-            )
-            db.add(notif)
-            db.commit()
-            db.refresh(notif)
-            return notif
 
 @router.post("/upload")
 async def upload_photos(

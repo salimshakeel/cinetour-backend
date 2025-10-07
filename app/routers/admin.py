@@ -7,6 +7,10 @@ from app.models.database import SessionLocal, Order, UploadedImage, Video, User 
 from sqlalchemy.sql import func
 from app.services.runway_service import generate_video
 from datetime import timedelta
+import dropbox
+# Initialize Dropbox
+DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
+dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
 router = APIRouter()
 # ---------------- ADMIN: VIDEOS LISTING ----------------
 @router.get("/admin/videos", tags=["Admin Portal"])
@@ -183,58 +187,76 @@ def admin_update_order_status(order_id: int, payload: dict):
 
 # ----------------------- ADMIN: UPLOAD FINAL VIDEO -----------------------
 @router.post("/admin/orders/{image_id}/final-video", tags=["Admin Portal"])
-async def admin_upload_final_video(order_id: int, file: UploadFile = File(...)):
-    """Admin uploads a final rendered video for an order.
-    
-    Saves to videos folder and marks the latest Video as succeeded.
+async def admin_upload_final_video(image_id: int, file: UploadFile = File(...)):
+    """Admin uploads a final rendered video for an image.
+    Saves to Dropbox and marks the latest Video as 'succeeded'.
     """
     db = SessionLocal()
     try:
-        image = db.query(UploadedImage).filter(UploadedImage.id == order_id).first()
+        # Fetch image entry
+        image = db.query(UploadedImage).filter(UploadedImage.id == image_id).first()
         if not image:
-            raise HTTPException(status_code=404, detail="Order not found")
-        
+            raise HTTPException(status_code=404, detail="Image not found")
+
         ts = int(time.time())
-        filename = f"final_{order_id}_{ts}.mp4"
-        video_path = os.path.join("videos", filename)
-        with open(video_path, "wb") as out:
+        filename = f"final_{image_id}_{ts}.mp4"
+        temp_path = f"/tmp/{filename}"
+
+        # Save temporarily (needed before upload)
+        with open(temp_path, "wb") as out:
             shutil.copyfileobj(file.file, out)
-        
-        # Latest video row or create if missing
+
+        # Upload to Dropbox
+        dropbox_path = f"/videos/{filename}"
+        with open(temp_path, "rb") as f:
+            dbx.files_upload(f.read(), dropbox_path, mode=dropbox.files.WriteMode("overwrite"))
+
+        # Generate a shareable Dropbox link
+        shared_link_metadata = dbx.sharing_create_shared_link_with_settings(dropbox_path)
+        video_url = shared_link_metadata.url.replace("?dl=0", "?raw=1")  # direct file link
+
+        # Get or create latest Video record
         latest_video = (
             db.query(Video)
-            .filter(Video.image_id == order_id)
+            .filter(Video.image_id == image_id)
             .order_by(Video.iteration.desc(), Video.id.desc())
             .first()
         )
         if not latest_video:
             latest_video = Video(
-                image_id=order_id,
+                image_id=image_id,
                 prompt=image.prompt or "",
                 iteration=1,
             )
             db.add(latest_video)
             db.commit()
             db.refresh(latest_video)
-        
+
+        # Update DB fields
         latest_video.status = "succeeded"
-        latest_video.video_path = video_path
-        latest_video.video_url = None
+        latest_video.video_path = dropbox_path
+        latest_video.video_url = video_url
+        latest_video.updated_at = datetime.utcnow()
         db.commit()
-        
-        # Mirror onto UploadedImage for convenience
-        image.video_path = video_path
-        image.video_url = None
+
+        # Mirror info on UploadedImage
+        image.video_path = dropbox_path
+        image.video_url = video_url
         image.video_generated_at = datetime.utcnow()
         db.commit()
-        
+
+        # ✅ Response
         return {
-            "order_id": image.id,
+            "image_id": image.id,
             "video_id": latest_video.id,
             "status": latest_video.status,
-            "local_url": f"/videos/{filename}",
-            "video_path": video_path,
+            "dropbox_path": dropbox_path,
+            "video_url": video_url,
+            "message": "Final video uploaded successfully to Dropbox.",
         }
+
+    except dropbox.exceptions.ApiError as e:
+        raise HTTPException(status_code=500, detail=f"Dropbox upload failed: {str(e)}")
     finally:
         db.close()
 
