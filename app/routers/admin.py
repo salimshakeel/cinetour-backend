@@ -64,8 +64,7 @@ def get_order_status():
             # Get images for this order
             images = db.query(UploadedImage).filter(UploadedImage.order_id == order.id).all()
 
-            # Get latest video per image (completed output)
-            # latest video per image subquery
+            # Latest video per image
             latest_video_subq = (
                 db.query(
                     Video.image_id,
@@ -75,26 +74,22 @@ def get_order_status():
                 .subquery()
             )
 
-            # get latest videos for this order
             latest_videos = (
                 db.query(Video)
                 .join(
                     latest_video_subq,
-                    (Video.image_id == latest_video_subq.c.image_id) &
-                    (Video.iteration == latest_video_subq.c.max_iter),
+                    (Video.image_id == latest_video_subq.c.image_id)
+                    & (Video.iteration == latest_video_subq.c.max_iter),
                 )
-                .join(UploadedImage, UploadedImage.id == Video.image_id)  # ✅ join UploadedImage
-                .filter(UploadedImage.order_id == order.id)                # ✅ filter by UploadedImage.order_id
+                .join(UploadedImage, UploadedImage.id == Video.image_id)
+                .filter(UploadedImage.order_id == order.id)
                 .all()
             )
 
-            # Map videos by image
             image_id_to_video = {v.image_id: v for v in latest_videos}
-
-            # Count photos
             photo_count = len(images)
 
-            # Decide status
+            # Determine order status
             if all(v.status == "completed" for v in image_id_to_video.values()):
                 status = "completed"
             elif any(v.status == "processing" for v in image_id_to_video.values()):
@@ -104,7 +99,7 @@ def get_order_status():
 
             response.append({
                 "order_id": order.id,
-                "client": order.user_id,  # or join User table for name/email
+                "client": order.user_id,
                 "package": order.package,
                 "add_ons": order.add_ons,
                 "photos": photo_count,
@@ -112,8 +107,8 @@ def get_order_status():
                 "date": order.created_at,
                 "videos": [
                     {
-                        "filename": v.video_path.split("/")[-1],
-                        "url": v.video_url,
+                        "filename": v.video_path.split("/")[-1] if v.video_path else None,
+                        "url": v.video_url or "",
                         "status": v.status
                     }
                     for v in image_id_to_video.values()
@@ -124,7 +119,6 @@ def get_order_status():
 
     finally:
         db.close()
-
 
 # ----------------------- ADMIN: UPDATE STATUS -----------------------
 
