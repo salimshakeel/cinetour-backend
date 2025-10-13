@@ -1,6 +1,9 @@
 from fastapi import APIRouter, HTTPException, UploadFile, File
 from datetime import datetime
 import os
+from datetime import datetime, timezone
+from fastapi import APIRouter
+from app.models.database import SessionLocal, Video, UploadedImage, Order
 import shutil
 import time
 from app.models.database import SessionLocal, Order, UploadedImage, Video, User ,Notification
@@ -8,6 +11,7 @@ from sqlalchemy.sql import func
 from app.services.runway_service import generate_video
 from datetime import timedelta
 import dropbox
+import tempfile
 # Initialize Dropbox
 DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
 dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
@@ -194,22 +198,25 @@ async def admin_upload_final_video(image_id: int, file: UploadFile = File(...)):
 
         ts = int(time.time())
         filename = f"final_{image_id}_{ts}.mp4"
-        temp_path = f"/tmp/{filename}"
 
-        # Save temporarily (needed before upload)
+        # ✅ Use a cross-platform temp directory
+        temp_dir = tempfile.gettempdir()
+        temp_path = os.path.join(temp_dir, filename)
+
+        # ✅ Save file temporarily
         with open(temp_path, "wb") as out:
             shutil.copyfileobj(file.file, out)
 
-        # Upload to Dropbox
+        # ✅ Upload to Dropbox
         dropbox_path = f"/videos/{filename}"
         with open(temp_path, "rb") as f:
             dbx.files_upload(f.read(), dropbox_path, mode=dropbox.files.WriteMode("overwrite"))
 
-        # Generate a shareable Dropbox link
+        # ✅ Create shareable link
         shared_link_metadata = dbx.sharing_create_shared_link_with_settings(dropbox_path)
-        video_url = shared_link_metadata.url.replace("?dl=0", "?raw=1")  # direct file link
+        video_url = shared_link_metadata.url.replace("?dl=0", "?raw=1")
 
-        # Get or create latest Video record
+        # ✅ Get or create latest Video record
         latest_video = (
             db.query(Video)
             .filter(Video.image_id == image_id)
@@ -226,18 +233,22 @@ async def admin_upload_final_video(image_id: int, file: UploadFile = File(...)):
             db.commit()
             db.refresh(latest_video)
 
-        # Update DB fields
+        # ✅ Update DB fields
         latest_video.status = "succeeded"
         latest_video.video_path = dropbox_path
         latest_video.video_url = video_url
         latest_video.updated_at = datetime.utcnow()
         db.commit()
 
-        # Mirror info on UploadedImage
+        # ✅ Mirror info on UploadedImage
         image.video_path = dropbox_path
         image.video_url = video_url
         image.video_generated_at = datetime.utcnow()
         db.commit()
+
+        # ✅ Optional: clean up temporary file
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
         # ✅ Response
         return {
@@ -251,6 +262,10 @@ async def admin_upload_final_video(image_id: int, file: UploadFile = File(...)):
 
     except dropbox.exceptions.ApiError as e:
         raise HTTPException(status_code=500, detail=f"Dropbox upload failed: {str(e)}")
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
     finally:
         db.close()
 
@@ -338,7 +353,7 @@ def admin_logs_status():
             "failed": db.query(Video).filter(Video.status == "failed").count(),
         }
 
-        # Get all videos with detailed processing info
+        # Get latest videos with detailed processing info
         videos = (
             db.query(Video)
             .join(UploadedImage, Video.image_id == UploadedImage.id)
@@ -348,29 +363,30 @@ def admin_logs_status():
             .all()
         )
 
-        # Build detailed logs with processing timeline
         logs = []
+        now = datetime.now(timezone.utc)  # ✅ timezone-aware reference time
+
         for v in videos:
-            # Get the uploaded image and order info
             image = db.query(UploadedImage).filter(UploadedImage.id == v.image_id).first()
             order = db.query(Order).filter(Order.id == image.order_id).first() if image else None
-            
-            # Calculate processing time
-            processing_time = None
-            if v.status == "succeeded" and v.created_at:
-                processing_time = (datetime.utcnow() - v.created_at).total_seconds()
-            
+
+            # ✅ Safe timezone-aware subtraction
+            created_at = v.created_at
+            if created_at is None:
+                processing_time = 0
+            else:
+                if created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=timezone.utc)
+                processing_time = (now - created_at).total_seconds()
+
             # Determine current stage
-            stage = "unknown"
-            if v.status == "queued":
-                stage = "Waiting in queue"
-            elif v.status == "processing":
-                stage = "Generating video with AI"
-            elif v.status == "succeeded":
-                stage = "Video completed"
-            elif v.status == "failed":
-                stage = "Generation failed"
-            
+            stage = {
+                "queued": "Waiting in queue",
+                "processing": "Generating video with AI",
+                "succeeded": "Video completed",
+                "failed": "Generation failed"
+            }.get(v.status, "Unknown")
+
             logs.append({
                 "video_id": v.id,
                 "image_id": v.image_id,
@@ -389,24 +405,31 @@ def admin_logs_status():
                 "package": order.package if order else "Unknown"
             })
 
-        # Get currently processing videos (for real-time updates)
-        processing_videos = [
-            {
+        # Get currently processing videos
+        processing_videos = []
+        for v in db.query(Video).filter(Video.status == "processing").all():
+            created_at = v.created_at
+            if created_at is not None:
+                if created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=timezone.utc)
+                elapsed_seconds = (now - created_at).total_seconds()
+            else:
+                elapsed_seconds = 0
+
+            processing_videos.append({
                 "video_id": v.id,
                 "image_id": v.image_id,
                 "prompt": v.prompt[:50] + "..." if v.prompt and len(v.prompt) > 50 else v.prompt,
-                "started_at": v.created_at.isoformat() if v.created_at else None,
-                "elapsed_seconds": (datetime.utcnow() - v.created_at).total_seconds() if v.created_at else 0,
+                "started_at": created_at.isoformat() if created_at else None,
+                "elapsed_seconds": elapsed_seconds,
                 "runway_job_id": v.runway_job_id
-            }
-            for v in db.query(Video).filter(Video.status == "processing").all()
-        ]
+            })
 
         return {
             "status": status_counts,
             "logs": logs,
             "processing_now": processing_videos,
-            "last_updated": datetime.utcnow().isoformat()
+            "last_updated": now.isoformat()
         }
     finally:
         db.close()

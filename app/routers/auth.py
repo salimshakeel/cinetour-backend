@@ -1,18 +1,17 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
-from app.models.database import SessionLocal, User
+from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
-import hashlib
-import os
-import time
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
 from google.oauth2 import id_token
 from google.auth.transport import requests
-from sqlalchemy.orm import Session
-from app.models.database import SessionLocal, User
+import hashlib
 import jwt
-from datetime import datetime, timedelta
+import os
+import time
+
+from app.models.database import SessionLocal, User, get_db
+
 
 router = APIRouter(tags=["Auth"])
 
@@ -20,6 +19,55 @@ GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 SECRET_KEY = os.getenv("SECRET_KEY", "your_secret_key")  # use strong secret in .env
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
+
+import jwt
+
+# Add this near the bottom of auth.py
+
+# oauth2_scheme = OAuth2PasswordBearer(tokenUrl="signin")
+bearer = HTTPBearer()
+
+def get_current_user(
+    creds: HTTPAuthorizationCredentials = Depends(bearer),
+    db: Session = Depends(get_db)
+):
+    # 1) confirm we received the header
+    if not creds:
+        print("🛑 No credentials object received (creds is None)")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+
+    # 2) show what the object looks like (for debugging)
+    print("🟢 HTTPAuthorizationCredentials object:", repr(creds))
+
+    # 3) the actual token string
+    token = creds.credentials.replace("Bearer ", "")
+
+    print("🟢 Token received (credentials):", token)
+
+    try:
+        # 4) decode and print payload
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        print("🟢 Decoded payload:", payload)
+
+        user_id = payload.get("user_id")
+        if not user_id:
+            print("🛑 user_id missing in token payload")
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            print(f"🛑 user not found for id={user_id}")
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+
+        print(f"✅ Authenticated user: {user.email} (id={user.id})")
+        return user
+
+    except jwt.ExpiredSignatureError:
+        print("🛑 Token expired")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
+    except jwt.PyJWTError as e:
+        print("🛑 JWT decode error:", str(e))
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
 def create_access_token(data: dict, expires_delta: timedelta) -> str:
     to_encode = data.copy()

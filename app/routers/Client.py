@@ -4,6 +4,7 @@ from sqlalchemy.sql import func
 from typing import List, Optional
 from datetime import datetime
 import shutil, os
+from app.routers.auth import get_current_user
 
 from app.models.database import SessionLocal, Order, UploadedImage, Video, Invoice, User
 
@@ -44,7 +45,8 @@ def get_download_center(user_id: int, db: Session = Depends(get_db)):
                 (Video.image_id == latest_video_subq.c.image_id) &
                 (Video.iteration == latest_video_subq.c.max_iter),
             )
-            .filter(Video.order_id == order.id, Video.status.in_(["completed", "succeeded"]))
+            .join(UploadedImage, UploadedImage.id == Video.image_id)  # ✅ Added join
+            .filter(UploadedImage.order_id == order.id, Video.status.in_(["completed", "succeeded"]))  # ✅ Fixed filter
             .all()
         )
 
@@ -118,23 +120,37 @@ async def create_new_order(
             "status": "unpaid"
         }
     }
-@router.get("/client/orders", tags=["Client"])
-def get_client_orders(user_id: int, db: Session = Depends(get_db)):
+@router.get("/orders/status")
+def get_client_orders(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
     """
-    Fetch all orders for a specific client with current status (submitted, processing, completed).
-    Mirrors admin's order management logic.
+    Fetch all orders for the currently authenticated client 
+    with their current status (submitted, processing, completed).
     """
-    orders = db.query(Order).filter(Order.user_id == user_id).order_by(Order.created_at.desc()).all()
-    response = []
+    user_id = current_user.id  # Automatically detect user from token/session
 
+    orders = (
+        db.query(Order)
+        .filter(Order.user_id == user_id)
+        .order_by(Order.created_at.desc())
+        .all()
+    )
+
+    if not orders:
+        raise HTTPException(status_code=404, detail="No orders found for this client.")
+
+    # Subquery to get only the latest video per image
+    latest_video_subq = (
+        db.query(Video.image_id, func.max(Video.iteration).label("max_iter"))
+        .group_by(Video.image_id)
+        .subquery()
+    )
+
+    response = []
     for order in orders:
         images = db.query(UploadedImage).filter(UploadedImage.order_id == order.id).all()
-
-        latest_video_subq = (
-            db.query(Video.image_id, func.max(Video.iteration).label("max_iter"))
-            .group_by(Video.image_id)
-            .subquery()
-        )
 
         latest_videos = (
             db.query(Video)
@@ -149,11 +165,11 @@ def get_client_orders(user_id: int, db: Session = Depends(get_db)):
         )
 
         image_id_to_video = {v.image_id: v for v in latest_videos}
+        statuses = [v.status for v in image_id_to_video.values()]
 
-        # Determine order status
-        if all(v.status == "succeeded" for v in image_id_to_video.values()):
+        if all(s == "succeeded" for s in statuses):
             status = "completed"
-        elif any(v.status == "processing" for v in image_id_to_video.values()):
+        elif any(s == "processing" for s in statuses):
             status = "processing"
         else:
             status = "submitted"
@@ -175,7 +191,6 @@ def get_client_orders(user_id: int, db: Session = Depends(get_db)):
         })
 
     return {"orders": response, "count": len(response)}
-
 # ---------------- 3. REORDER ----------------
 @router.post("/orders/{order_id}/reorder")
 def reorder(order_id: int, db: Session = Depends(get_db)):
