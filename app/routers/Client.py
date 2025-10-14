@@ -81,11 +81,24 @@ def client_status(current_user: User = Depends(get_current_user), db: Session = 
 
 # ---------------- 1. DOWNLOAD CENTER ----------------
 @router.get("/download-center")
-def get_download_center(user_id: int, db: Session = Depends(get_db)):
+def get_download_center(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """
-    Returns only completed videos for a specific client (user).
+    Returns only completed videos for the currently logged-in client.
     """
-    orders = db.query(Order).filter(Order.user_id == user_id).order_by(Order.created_at.desc()).all()
+    # 🔐 Use the ID from JWT (no need to pass user_id manually)
+    user_id = current_user.id
+
+    # Get all orders for this user
+    orders = (
+        db.query(Order)
+        .filter(Order.user_id == user_id)
+        .order_by(Order.created_at.desc())
+        .all()
+    )
+
     response = []
 
     for order in orders:
@@ -106,8 +119,11 @@ def get_download_center(user_id: int, db: Session = Depends(get_db)):
                 (Video.image_id == latest_video_subq.c.image_id) &
                 (Video.iteration == latest_video_subq.c.max_iter),
             )
-            .join(UploadedImage, UploadedImage.id == Video.image_id)  # ✅ Added join
-            .filter(UploadedImage.order_id == order.id, Video.status.in_(["completed", "succeeded"]))  # ✅ Fixed filter
+            .join(UploadedImage, UploadedImage.id == Video.image_id)
+            .filter(
+                UploadedImage.order_id == order.id,
+                Video.status.in_(["completed", "succeeded"])
+            )
             .all()
         )
 
