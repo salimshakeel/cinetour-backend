@@ -18,6 +18,67 @@ def get_db():
     finally:
         db.close()
 
+
+# ---------------- CLIENT: STATUS ----------------
+
+@router.get("/client/status")
+def client_status(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """
+    Returns whether the user has any orders and basic info about them,
+    including related videos (if available).
+    """
+    orders = db.query(Order).filter(Order.user_id == current_user.id).all()
+
+    if not orders:
+        return {
+            "has_orders": False,
+            "user_email": current_user.email,
+            "user_name": current_user.name
+        }
+
+    response_orders = []
+
+    for order in orders:
+        # get all uploaded images for this order
+        images_data = []
+        for img in order.images:
+            # collect related video info
+            videos = db.query(Video).filter(Video.image_id == img.id).all()
+            videos_data = [
+                {
+                    "id": v.id,
+                    "prompt": v.prompt,
+                    "status": v.status,
+                    "video_url": v.video_url,
+                    "created_at": v.created_at
+                }
+                for v in videos
+            ]
+
+            images_data.append({
+                "id": img.id,
+                "filename": img.filename,
+                "video_url": img.video_url,
+                "video_generated_at": img.video_generated_at,
+                "videos": videos_data
+            })
+
+        response_orders.append({
+            "order_id": order.id,
+            "package": order.package,
+            "add_ons": order.add_ons,
+            "created_at": order.created_at,
+            "images": images_data
+        })
+
+    return {
+        "has_orders": True,
+        "user_email": current_user.email,
+        "user_name": current_user.name,
+        "orders": response_orders
+    }
+
+
 # ---------------- 1. DOWNLOAD CENTER ----------------
 @router.get("/download-center")
 def get_download_center(user_id: int, db: Session = Depends(get_db)):
@@ -139,7 +200,7 @@ def get_client_orders(
     )
 
     if not orders:
-        raise HTTPException(status_code=404, detail="No orders found for this client.")
+        raise HTTPException(status_code=44, detail="No orders found for this client.")
 
     # Subquery to get only the latest video per image
     latest_video_subq = (
