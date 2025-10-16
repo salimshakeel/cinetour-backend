@@ -1,12 +1,14 @@
-from fastapi import APIRouter, HTTPException, UploadFile, File
+from fastapi import APIRouter, HTTPException, UploadFile, File , Depends
 from datetime import datetime
 import os
 from datetime import datetime, timezone
 from fastapi import APIRouter
 from app.models.database import SessionLocal, Video, UploadedImage, Order
 import shutil
-import time
+import time 
 from app.models.database import SessionLocal, Order, UploadedImage, Video, User ,Notification
+from app.models.database import get_db
+from sqlalchemy.orm import Session  
 from sqlalchemy.sql import func
 from app.services.runway_service import generate_video
 from datetime import timedelta
@@ -520,3 +522,24 @@ def admin_notifications():
         return {"notifications": notifications}
     finally:
         db.close()
+        
+@router.get("/admin/clients", tags=["Admin Portal"])
+def get_all_clients(db: Session = Depends(get_db)):
+    """
+    Return all registered clients for the Admin Dashboard.
+    Includes name, email, joined date, and total orders.
+    """
+    clients = db.query(User).filter(User.is_guest == False).all()
+
+    response = []
+    for client in clients:
+        total_orders = db.query(Order).filter(Order.user_id == client.id).count()
+        response.append({
+            "id": client.id,
+            "name": client.name or "N/A",
+            "email": client.email,
+            "joined": client.created_at.strftime("%Y-%m-%d") if client.created_at else None,
+            "orders": total_orders
+        })
+
+    return {"clients": response, "count": len(response)}
