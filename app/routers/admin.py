@@ -344,7 +344,7 @@ from sqlalchemy.orm import joinedload
 # ----------------------- ADMIN: LOGS & STATUS -----------------------
 @router.get("/admin/logs-status", tags=["Admin Portal"])
 def admin_logs_status():
-    """Return grouped and readable video processing logs with username and order_id."""
+    """Return grouped and readable video processing logs with username and order_id quickly."""
     db: Session = SessionLocal()
     try:
         now = datetime.now(timezone.utc)
@@ -352,13 +352,18 @@ def admin_logs_status():
 
         # Loop through each status type
         for status in ["queued", "processing", "succeeded", "failed"]:
+            # Select only needed fields
             videos = (
-                db.query(Video)
-                .options(
-                    joinedload(Video.image)
-                    .joinedload(UploadedImage.order)
-                    .joinedload(Order.user)  # Load the user linked to the order
+                db.query(
+                    Video.id.label("video_id"),
+                    Order.id.label("order_id"),
+                    User.name.label("user_name"),
+                    User.email.label("user_email"),
+                    Video.created_at
                 )
+                .join(UploadedImage, Video.image_id == UploadedImage.id)
+                .join(Order, UploadedImage.order_id == Order.id)
+                .outerjoin(User, Order.user_id == User.id)
                 .filter(Video.status == status)
                 .order_by(Video.created_at.desc())
                 .limit(20)
@@ -366,21 +371,22 @@ def admin_logs_status():
             )
 
             for v in videos:
-                image = v.image
-                order = image.order if image else None
-                user = order.user if order else None
-
-                # Proper username logic
-                username = (user.name or user.email) if user else "Guest"
+                # Determine username to show
+                if v.user_name:
+                    username = v.user_name
+                elif v.user_email:
+                    username = v.user_email
+                else:
+                    username = "Guest"
 
                 response[status].append({
-                    "video_id": v.id,
-                    "order_id": order.id if order else None,
+                    "video_id": v.video_id,
+                    "order_id": v.order_id,
                     "username": username,
-                    "created_at": v.created_at.isoformat() if v.created_at else None,
+                    "created_at": v.created_at.isoformat() if v.created_at else None
                 })
 
-        # Summary counts
+        # Add summary counts
         summary = {
             "queued": db.query(Video).filter(Video.status == "queued").count(),
             "processing": db.query(Video).filter(Video.status == "processing").count(),
