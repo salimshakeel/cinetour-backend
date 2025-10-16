@@ -340,102 +340,62 @@ def admin_regenerate_video(image_id: int, payload: dict):
     finally:
         db.close()
 
-
+from sqlalchemy.orm import joinedload
 # ----------------------- ADMIN: LOGS & STATUS -----------------------
 @router.get("/admin/logs-status", tags=["Admin Portal"])
 def admin_logs_status():
-    """Return real-time video processing status and detailed logs."""
-    db = SessionLocal()
+    """Return grouped and readable video processing logs with username and order_id."""
+    db: Session = SessionLocal()
     try:
-        # Summary by status
-        status_counts = {
+        now = datetime.now(timezone.utc)
+        response = {"queued": [], "processing": [], "succeeded": [], "failed": []}
+
+        # Loop through each status type
+        for status in ["queued", "processing", "succeeded", "failed"]:
+            videos = (
+                db.query(Video)
+                .options(
+                    joinedload(Video.image)
+                    .joinedload(UploadedImage.order)
+                    .joinedload(Order.user)  # Load the user linked to the order
+                )
+                .filter(Video.status == status)
+                .order_by(Video.created_at.desc())
+                .limit(20)
+                .all()
+            )
+
+            for v in videos:
+                image = v.image
+                order = image.order if image else None
+                user = order.user if order else None
+
+                # Proper username logic
+                username = (user.name or user.email) if user else "Guest"
+
+                response[status].append({
+                    "video_id": v.id,
+                    "order_id": order.id if order else None,
+                    "username": username,
+                    "created_at": v.created_at.isoformat() if v.created_at else None,
+                })
+
+        # Summary counts
+        summary = {
             "queued": db.query(Video).filter(Video.status == "queued").count(),
             "processing": db.query(Video).filter(Video.status == "processing").count(),
             "succeeded": db.query(Video).filter(Video.status == "succeeded").count(),
             "failed": db.query(Video).filter(Video.status == "failed").count(),
         }
 
-        # Get latest videos with detailed processing info
-        videos = (
-            db.query(Video)
-            .join(UploadedImage, Video.image_id == UploadedImage.id)
-            .join(Order, UploadedImage.order_id == Order.id)
-            .order_by(Video.created_at.desc())
-            .limit(50)
-            .all()
-        )
-
-        logs = []
-        now = datetime.now(timezone.utc)  # ✅ timezone-aware reference time
-
-        for v in videos:
-            image = db.query(UploadedImage).filter(UploadedImage.id == v.image_id).first()
-            order = db.query(Order).filter(Order.id == image.order_id).first() if image else None
-
-            # ✅ Safe timezone-aware subtraction
-            created_at = v.created_at
-            if created_at is None:
-                processing_time = 0
-            else:
-                if created_at.tzinfo is None:
-                    created_at = created_at.replace(tzinfo=timezone.utc)
-                processing_time = (now - created_at).total_seconds()
-
-            # Determine current stage
-            stage = {
-                "queued": "Waiting in queue",
-                "processing": "Generating video with AI",
-                "succeeded": "Video completed",
-                "failed": "Generation failed"
-            }.get(v.status, "Unknown")
-
-            logs.append({
-                "video_id": v.id,
-                "image_id": v.image_id,
-                "order_id": order.id if order else None,
-                "iteration": v.iteration,
-                "status": v.status,
-                "stage": stage,
-                "prompt": v.prompt[:100] + "..." if v.prompt and len(v.prompt) > 100 else v.prompt,
-                "video_path": v.video_path,
-                "video_url": v.video_url,
-                "runway_job_id": v.runway_job_id,
-                "created_at": v.created_at.isoformat() if v.created_at else None,
-                "updated_at": v.updated_at.isoformat() if v.updated_at else None,
-                "processing_time_seconds": processing_time,
-                "client_email": order.user.email if order and order.user else "Guest",
-                "package": order.package if order else "Unknown"
-            })
-
-        # Get currently processing videos
-        processing_videos = []
-        for v in db.query(Video).filter(Video.status == "processing").all():
-            created_at = v.created_at
-            if created_at is not None:
-                if created_at.tzinfo is None:
-                    created_at = created_at.replace(tzinfo=timezone.utc)
-                elapsed_seconds = (now - created_at).total_seconds()
-            else:
-                elapsed_seconds = 0
-
-            processing_videos.append({
-                "video_id": v.id,
-                "image_id": v.image_id,
-                "prompt": v.prompt[:50] + "..." if v.prompt and len(v.prompt) > 50 else v.prompt,
-                "started_at": created_at.isoformat() if created_at else None,
-                "elapsed_seconds": elapsed_seconds,
-                "runway_job_id": v.runway_job_id
-            })
-
         return {
-            "status": status_counts,
-            "logs": logs,
-            "processing_now": processing_videos,
+            "summary": summary,
+            "details": response,
             "last_updated": now.isoformat()
         }
+
     finally:
         db.close()
-
 
 # ----------------------- ADMIN: NOTIFICATIONS -----------------------
 @router.get("/admin/notifications", tags=["Admin Portal"])
