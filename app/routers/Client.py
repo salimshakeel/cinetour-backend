@@ -6,7 +6,7 @@ from datetime import datetime
 import shutil, os
 from app.routers.auth import get_current_user
 
-from app.models.database import SessionLocal, Order, UploadedImage, Video, Invoice, User
+from app.models.database import SessionLocal, Order, UploadedImage, Video, Invoice, User , Payment
 
 router = APIRouter(tags=["Client Portal"])
 
@@ -306,58 +306,51 @@ def reorder(order_id: int, db: Session = Depends(get_db)):
         }
     }
 
-# ---------------- 4. INVOICES ----------------
-@router.get("/{user_id}/invoices")
-def get_invoices(user_id: int, db: Session = Depends(get_db)):
-    """Get all invoices for a user."""
-    invoices = db.query(Invoice).filter(Invoice.user_id == user_id).all()
-    return {
-        "invoices": [
-            {
-                "id": inv.id,
-                "order_id": inv.order_id,
-                "amount": inv.amount,
-                "status": "paid" if inv.is_paid else "unpaid",
-                "date": inv.created_at.isoformat()
-            }
-            for inv in invoices
-        ]
-    }
+@router.get("/invoices")
+def get_client_invoices(
+    current_user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Returns all invoices for the logged-in user,
+    including Stripe payment info and order details.
+    """
+    invoices = (
+        db.query(Invoice)
+        .filter(Invoice.user_id == current_user.id)
+        .all()
+    )
 
-@router.get("/invoice/{invoice_id}")
-def get_invoice(invoice_id: int, db: Session = Depends(get_db)):
-    """Get details of a single invoice."""
-    invoice = db.query(Invoice).filter(Invoice.id == invoice_id).first()
-    if not invoice:
-        raise HTTPException(status_code=404, detail="Invoice not found")
+    if not invoices:
+        raise HTTPException(status_code=404, detail="No invoices found")
 
-    return {
-        "id": invoice.id,
-        "order_id": invoice.order_id,
-        "amount": invoice.amount,
-        "status": "paid" if invoice.is_paid else "unpaid",
-        "date": invoice.created_at.isoformat(),
-        "paid_at": invoice.paid_at.isoformat() if invoice.paid_at else None
-    }
+    response = []
 
-@router.post("/invoice/{order_id}/pay")
-def pay_invoice(order_id: int, db: Session = Depends(get_db)):
-    """Mark invoice as paid (later integrate Stripe/PayPal here)."""
-    invoice = db.query(Invoice).filter(Invoice.order_id == order_id).first()
-    if not invoice:
-        raise HTTPException(status_code=404, detail="Invoice not found")
+    for inv in invoices:
+        payment = (
+            db.query(Payment)
+            .filter(Payment.order_id == inv.order_id)
+            .order_by(Payment.created_at.desc())
+            .first()
+        )
 
-    if invoice.is_paid:
-        return {"message": "Invoice already paid", "invoice_id": invoice.id}
+        order = db.query(Order).filter(Order.id == inv.order_id).first()
 
-    invoice.is_paid = True
-    invoice.paid_at = datetime.utcnow()
-    db.commit()
-    return {
-        "message": "Invoice paid successfully",
-        "invoice": {
-            "id": invoice.id,
-            "status": "paid",
-            "paid_at": invoice.paid_at.isoformat()
-        }
-    }
+        response.append({
+            "invoice_id": inv.id,
+            "order_id": inv.order_id,
+            "amount": inv.amount,
+            "currency": payment.currency if payment else "usd",
+            "status": payment.status if payment else inv.status,
+            "is_paid": True if (payment and payment.status == "succeeded") else False,
+            "created_at": inv.created_at,
+            "due_date": inv.due_date,
+            "order_info": {
+                "package": order.package if order else None,
+                "addons": order.add_ons if order else None,
+                "created_at": order.created_at if order else None
+            },
+            "stripe_metadata": payment.payment_metadata if payment else None,
+        })
+
+    return {"user": current_user.email, "invoices": response}
