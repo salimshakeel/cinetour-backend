@@ -13,10 +13,25 @@ from sqlalchemy.sql import func
 from app.services.runway_service import generate_video
 from datetime import timedelta
 import dropbox
+from app.models.database import SessionLocal
+import dropbox, time, os, tempfile, shutil
+from fastapi import HTTPException
+from datetime import datetime
+from app.models.database import UploadedImage, Video
+
+from app.config import DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN
 import tempfile
+
 # Initialize Dropbox
 DROPBOX_ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
-dbx = dropbox.Dropbox(DROPBOX_ACCESS_TOKEN)
+DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
+DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
+DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
+dbx = dropbox.Dropbox(
+            app_key=DROPBOX_APP_KEY,
+            app_secret=DROPBOX_APP_SECRET,
+            oauth2_refresh_token=DROPBOX_REFRESH_TOKEN
+        )
 router = APIRouter()
 # ---------------- ADMIN: VIDEOS LISTING ----------------
 @router.get("/admin/videos", tags=["Admin Portal"])
@@ -188,12 +203,22 @@ def admin_update_order_status(order_id: int, payload: dict):
 # ----------------------- ADMIN: UPLOAD FINAL VIDEO -----------------------
 @router.post("/admin/orders/{image_id}/final-video", tags=["Admin Portal"])
 async def admin_upload_final_video(image_id: int, file: UploadFile = File(...)):
-    """Admin uploads a final rendered video for an image.
-    Saves to Dropbox and marks the latest Video as 'succeeded'.
     """
+    Admin uploads a final rendered video for an image.
+    Saves it to Dropbox using OAuth2 refresh token and marks the latest Video as 'succeeded'.
+    """
+    
+
+    # ✅ Initialize Dropbox client with OAuth2 Refresh Token
+    dbx = dropbox.Dropbox(
+        app_key=DROPBOX_APP_KEY,
+        app_secret=DROPBOX_APP_SECRET,
+        oauth2_refresh_token=DROPBOX_REFRESH_TOKEN
+    )
+
     db = SessionLocal()
     try:
-        # Fetch image entry
+        # 🔍 Fetch the image entry
         image = db.query(UploadedImage).filter(UploadedImage.id == image_id).first()
         if not image:
             raise HTTPException(status_code=404, detail="Image not found")
@@ -201,30 +226,30 @@ async def admin_upload_final_video(image_id: int, file: UploadFile = File(...)):
         ts = int(time.time())
         filename = f"final_{image_id}_{ts}.mp4"
 
-        # ✅ Use a cross-platform temp directory
+        # ✅ Save uploaded file temporarily
         temp_dir = tempfile.gettempdir()
         temp_path = os.path.join(temp_dir, filename)
 
-        # ✅ Save file temporarily
         with open(temp_path, "wb") as out:
             shutil.copyfileobj(file.file, out)
 
-        # ✅ Upload to Dropbox
+        # ✅ Upload file to Dropbox
         dropbox_path = f"/videos/{filename}"
         with open(temp_path, "rb") as f:
             dbx.files_upload(f.read(), dropbox_path, mode=dropbox.files.WriteMode("overwrite"))
 
-        # ✅ Create shareable link
+        # ✅ Create a shareable Dropbox link (and convert to raw link)
         shared_link_metadata = dbx.sharing_create_shared_link_with_settings(dropbox_path)
         video_url = shared_link_metadata.url.replace("?dl=0", "?raw=1")
 
-        # ✅ Get or create latest Video record
+        # ✅ Find latest or create new Video record
         latest_video = (
             db.query(Video)
             .filter(Video.image_id == image_id)
             .order_by(Video.iteration.desc(), Video.id.desc())
             .first()
         )
+
         if not latest_video:
             latest_video = Video(
                 image_id=image_id,
@@ -235,7 +260,7 @@ async def admin_upload_final_video(image_id: int, file: UploadFile = File(...)):
             db.commit()
             db.refresh(latest_video)
 
-        # ✅ Update DB fields
+        # ✅ Update DB with Dropbox info
         latest_video.status = "succeeded"
         latest_video.video_path = dropbox_path
         latest_video.video_url = video_url
@@ -248,11 +273,10 @@ async def admin_upload_final_video(image_id: int, file: UploadFile = File(...)):
         image.video_generated_at = datetime.utcnow()
         db.commit()
 
-        # ✅ Optional: clean up temporary file
+        # ✅ Clean up temp file
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
-        # ✅ Response
         return {
             "image_id": image.id,
             "video_id": latest_video.id,
@@ -266,7 +290,7 @@ async def admin_upload_final_video(image_id: int, file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Dropbox upload failed: {str(e)}")
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail={str(e)})
 
     finally:
         db.close()
@@ -342,28 +366,86 @@ def admin_regenerate_video(image_id: int, payload: dict):
 
 from sqlalchemy.orm import joinedload
 # ----------------------- ADMIN: LOGS & STATUS -----------------------
+# @router.get("/admin/logs-status", tags=["Admin Portal"])
+# def admin_logs_status():
+#     """Return grouped and readable video processing logs with username and order_id quickly."""
+#     db: Session = SessionLocal()
+#     try:
+#         now = datetime.now(timezone.utc)
+#         response = {"queued": [], "processing": [], "succeeded": [], "failed": []}
+        
+#         # Loop through each status type
+#         for status in ["queued", "processing", "succeeded", "failed"]:
+#             # Select only needed fields
+#             videos = (
+#                 db.query(
+#                     Video.id.label("video_id"),
+#                     Order.id.label("order_id"),
+#                     User.name.label("username"),
+#                     User.email.label("email"),
+#                     Video.created_at
+#                 )
+#                 .join(UploadedImage, Video.image_id == UploadedImage.id)
+#                 .join(Order, UploadedImage.order_id == Order.id)
+#                 .outerjoin(User, Order.user_id == User.id)
+#                 .filter(Video.status == status)
+#                 .order_by(Video.created_at.desc())
+#                 .limit(20)
+#                 .all()
+#             )
+
+#             for v in videos:
+#                 for v in videos:
+#                     print(v)
+#                     # print(v.__dict__)
+#                     break
+
+#                 # Determine username to show
+#                 if v.username:
+#                     username = v.username
+#                 elif v.email:
+#                     username = v.email
+#                 else:
+#                     username = "Guest"
+#                 response[status].append({
+#                     "video_id": v.video_id,
+#                     "order_id": v.order_id,
+#                     "username": username,
+#                     "email": v.email,
+#                     "created_at": v.created_at.isoformat() if v.created_at else None
+#                 })
+
+#         # Add summary counts
+#         summary = {
+#             "queued": db.query(Video).filter(Video.status == "queued").count(),
+#             "processing": db.query(Video).filter(Video.status == "processing").count(),
+#             "succeeded": db.query(Video).filter(Video.status == "succeeded").count(),
+#             "failed": db.query(Video).filter(Video.status == "failed").count(),
+#         }
+
+#         return {
+#             "summary": summary,
+#             "details": response,
+#             "last_updated": now.isoformat()
+#         }
+
+#     finally:
+#         db.close()
+
 @router.get("/admin/logs-status", tags=["Admin Portal"])
 def admin_logs_status():
-    """Return grouped and readable video processing logs with username and order_id quickly."""
-    db: Session = SessionLocal()
+    """Return grouped and readable video processing logs."""
+    db = SessionLocal()
     try:
         now = datetime.now(timezone.utc)
         response = {"queued": [], "processing": [], "succeeded": [], "failed": []}
 
         # Loop through each status type
         for status in ["queued", "processing", "succeeded", "failed"]:
-            # Select only needed fields
             videos = (
-                db.query(
-                    Video.id.label("video_id"),
-                    Order.id.label("order_id"),
-                    User.name.label("user_name"),
-                    User.email.label("user_email"),
-                    Video.created_at
-                )
+                db.query(Video)
                 .join(UploadedImage, Video.image_id == UploadedImage.id)
                 .join(Order, UploadedImage.order_id == Order.id)
-                .outerjoin(User, Order.user_id == User.id)
                 .filter(Video.status == status)
                 .order_by(Video.created_at.desc())
                 .limit(20)
@@ -371,19 +453,27 @@ def admin_logs_status():
             )
 
             for v in videos:
-                # Determine username to show
-                if v.user_name:
-                    username = v.user_name
-                elif v.user_email:
-                    username = v.user_email
-                else:
-                    username = "Guest"
+                image = v.image
+                order = image.order if image else None
+                user = order.user if order else None
+
+                # Calculate elapsed time
+                created_at = v.created_at or now
+                if created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=timezone.utc)
+                elapsed_seconds = (now - created_at).total_seconds()
+                elapsed_minutes = round(elapsed_seconds / 60, 1)
 
                 response[status].append({
-                    "video_id": v.video_id,
-                    "order_id": v.order_id,
-                    "username": username,
-                    "created_at": v.created_at.isoformat() if v.created_at else None
+                    "video_id": v.id,
+                    "prompt": v.prompt[:80] + "..." if len(v.prompt) > 80 else v.prompt,
+                    "package": order.package if order else "Unknown",
+                    "client": user.email if user else "Guest",
+                    "created_at": v.created_at.isoformat() if v.created_at else None,
+                    "elapsed_time": f"{elapsed_minutes} min ago",
+                    "video_url": v.video_url,
+                    "runway_job_id": v.runway_job_id,
+                    "iteration": v.iteration,
                 })
 
         # Add summary counts
