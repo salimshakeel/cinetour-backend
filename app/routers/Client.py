@@ -6,7 +6,7 @@ from datetime import datetime
 import shutil, os
 from app.routers.auth import get_current_user
 
-from app.models.database import SessionLocal, Order, UploadedImage, Video, Invoice, User , Payment
+from app.models.database import SessionLocal, Order, UploadedImage, Video, Invoice, User , Payment, FinalVideo
 
 router = APIRouter(tags=["Client Portal"])
 
@@ -80,69 +80,110 @@ def client_status(current_user: User = Depends(get_current_user), db: Session = 
 
 
 # ---------------- 1. DOWNLOAD CENTER ----------------
+# @router.get("/download-center")
+# def get_download_center(
+#     current_user: User = Depends(get_current_user),
+#     db: Session = Depends(get_db)
+# ):
+#     """
+#     Returns only final (completed/succeeded) videos for the currently logged-in client.
+#     """
+#     user_id = current_user.id
+
+#     # Get all orders for this user
+#     orders = (
+#         db.query(Order)
+#         .filter(Order.user_id == user_id)
+#         .order_by(Order.created_at.desc())
+#         .all()
+#     )
+
+#     response = []
+
+#     for order in orders:
+#         # Get latest completed/succeeded videos for images in this order
+#         latest_video_subq = (
+#             db.query(
+#                 Video.image_id.label("image_id"),
+#                 func.max(Video.iteration).label("max_iter")
+#             )
+#             .group_by(Video.image_id)
+#             .subquery()
+#         )
+
+#         completed_videos = (
+#             db.query(Video)
+#             .join(
+#                 latest_video_subq,
+#                 (Video.image_id == latest_video_subq.c.image_id) &
+#                 (Video.iteration == latest_video_subq.c.max_iter)
+#             )
+#             .join(UploadedImage, UploadedImage.id == Video.image_id)
+#             .filter(
+#                 UploadedImage.order_id == order.id,
+#                 Video.status.in_(["completed", "succeeded"])
+#             )
+#             .all()
+#         )
+
+#         # Build response for each completed video
+#         videos_info = []
+#         for v in completed_videos:
+#             if v.video_url:
+#                 # Convert Dropbox URL to direct link (so frontend can preview/download)
+#                 direct_url = v.video_url.replace("?dl=0", "?raw=1")
+#                 videos_info.append({
+#                     "filename": v.video_path.split("/")[-1] if v.video_path else None,
+#                     "direct_url": direct_url,
+#                     "dropbox_url": v.video_url,
+#                     "status": v.status
+#                 })
+
+#         if videos_info:
+#             response.append({
+#                 "order_id": order.id,
+#                 "package": order.package,
+#                 "add_ons": order.add_ons,
+#                 "date": order.created_at.isoformat(),
+#                 "videos": videos_info
+#             })
+
+#     return {
+#         "user_email": current_user.email,
+#         "downloads": response,
+#         "count": len(response)
+#     }
+
 @router.get("/download-center")
 def get_download_center(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """
-    Returns only completed videos for the currently logged-in client.
-    """
-    # 🔐 Use the ID from JWT (no need to pass user_id manually)
     user_id = current_user.id
 
-    # Get all orders for this user
-    orders = (
-        db.query(Order)
-        .filter(Order.user_id == user_id)
-        .order_by(Order.created_at.desc())
+    final_videos = (
+        db.query(FinalVideo)
+        .filter(FinalVideo.user_id == user_id)
+        .order_by(FinalVideo.created_at.desc())
         .all()
     )
 
-    response = []
+    downloads = [
+        {
+            "video_id": v.id,
+            "filename": os.path.basename(v.dropbox_path),
+            "url": v.video_url,
+            "created_at": v.created_at.isoformat() if v.created_at else None
+        }
+        for v in final_videos
+    ]
 
-    for order in orders:
-        # Get only latest completed videos per image
-        latest_video_subq = (
-            db.query(
-                Video.image_id.label("image_id"),
-                func.max(Video.iteration).label("max_iter")
-            )
-            .group_by(Video.image_id)
-            .subquery()
-        )
+    return {
+        "user_email": current_user.email,
+        "downloads": downloads,
+        "count": len(downloads)
+    }
 
-        completed_videos = (
-            db.query(Video)
-            .join(
-                latest_video_subq,
-                (Video.image_id == latest_video_subq.c.image_id) &
-                (Video.iteration == latest_video_subq.c.max_iter),
-            )
-            .join(UploadedImage, UploadedImage.id == Video.image_id)
-            .filter(
-                UploadedImage.order_id == order.id,
-                Video.status.in_(["completed", "succeeded"])
-            )
-            .all()
-        )
-
-        if completed_videos:
-            response.append({
-                "order_id": order.id,
-                "package": order.package,
-                "add_ons": order.add_ons,
-                "date": order.created_at.isoformat(),
-                "videos": [
-                    {
-                        "filename": v.video_path.split("/")[-1] if v.video_path else None,
-                        "url": v.video_url
-                    }
-                    for v in completed_videos
-                ],
-            })
-
-    return {"downloads": response, "count": len(response)}
 
 # ---------------- 2. NEW ORDER ----------------
 @router.post("/orders/new")

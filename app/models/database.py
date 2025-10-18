@@ -77,6 +77,8 @@ class Video(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), default=datetime.utcnow)
     image = relationship("UploadedImage", back_populates="videos")
     
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    user = relationship("User", back_populates="videos") 
     
 class Feedback(Base):
     __tablename__ = "feedback"
@@ -103,6 +105,7 @@ class User(Base):
     orders = relationship("Order", back_populates="user")
     invoices = relationship("Invoice", back_populates="user")
     payments = relationship("Payment", back_populates="user")
+    videos = relationship("Video", back_populates="user")  
 
 class Invoice(Base):
     __tablename__ = "invoices"
@@ -161,3 +164,17 @@ class Notification(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     user = relationship("User", back_populates="notifications")
+    
+
+class FinalVideo(Base):
+    __tablename__ = "final_videos"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    image_id = Column(Integer, ForeignKey("uploaded_images.id"), nullable=False)
+    dropbox_path = Column(String, nullable=False)
+    video_url = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    user = relationship("User")
+    image = relationship("UploadedImage")

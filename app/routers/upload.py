@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from typing import List, Optional
 from pydantic import BaseModel
 from runwayml import RunwayML
+from dropbox.exceptions import ApiError
 from fastapi import BackgroundTasks
 from app.models.database import SessionLocal, UploadedImage, Video, Feedback, Order, Notification
 from app.services.prompt_generator import (
@@ -81,6 +82,8 @@ def optimize_image_for_runway(image_path: str, max_width: int = 1024, max_height
     except Exception as e:
         print(f"⚠️ Image optimization failed: {e}")
         return image_path
+    
+    
 @router.get("/runway/status")
 def runway_status():
     """
@@ -107,17 +110,27 @@ def create_notification(db: Session, user_id: int, type_: str, message: str):
     db.commit()
     db.refresh(notif)
     return notif
+
 def upload_video_to_dropbox(video_url: str, dropbox_path: str) -> bool:
     """
     Uploads a video directly from a URL to Dropbox without saving locally.
-    Initializes Dropbox client inside the function.
+    Uses refresh-token authentication for permanent access.
     """
     try:
-        print(f"[DEBUG] Initializing Dropbox client")
-        DROPBOX_TOKEN = os.getenv("DROPBOX_TOKEN")
-        if not DROPBOX_TOKEN:
-            raise Exception("DROPBOX_TOKEN not found in environment variables")
-        dbx = dropbox.Dropbox(DROPBOX_TOKEN)
+        print(f"[DEBUG] Initializing Dropbox client with refresh token")
+
+        DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
+        DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
+        DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
+
+        if not all([DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN]):
+            raise Exception("Missing Dropbox credentials in environment variables")
+
+        dbx = dropbox.Dropbox(
+            app_key=DROPBOX_APP_KEY,
+            app_secret=DROPBOX_APP_SECRET,
+            oauth2_refresh_token=DROPBOX_REFRESH_TOKEN
+        )
 
         print(f"[DEBUG] Downloading video from URL → {video_url}")
         resp = requests.get(video_url, timeout=300)
@@ -126,8 +139,13 @@ def upload_video_to_dropbox(video_url: str, dropbox_path: str) -> bool:
 
         print(f"[DEBUG] Uploading video to Dropbox → {dropbox_path}")
         dbx.files_upload(video_bytes, dropbox_path, mode=dropbox.files.WriteMode.overwrite)
-        print(f"[OK] Uploaded to Dropbox → {dropbox_path}")
+
+        print(f"[OK] Uploaded successfully to Dropbox → {dropbox_path}")
         return True
+
+    except ApiError as api_err:
+        print(f"[ERROR] Dropbox API error: {api_err}")
+        return False
     except Exception as e:
         print(f"[ERROR] Dropbox upload failed: {e}")
         return False
@@ -213,6 +231,7 @@ def process_videos_for_order(order_id: int, file_paths: list):
 
             # Save Video row
             video_row = Video(
+                user_id=order.user_id,          # 👈 FIXED: link video to the same user as order
                 image_id=img_row.id,
                 prompt=prompt_text,
                 runway_job_id=task_id,
@@ -297,6 +316,7 @@ async def upload_photos(
             "order_id": order.id,
             "package": order.package,
             "add_ons": order.add_ons,
+            "image_id": Video.image_id
         }
 
     finally:

@@ -3,7 +3,7 @@ from datetime import datetime
 import os
 from datetime import datetime, timezone
 from fastapi import APIRouter
-from app.models.database import SessionLocal, Video, UploadedImage, Order
+from app.models.database import SessionLocal, Video, UploadedImage, Order , FinalVideo , User , Notification , Payment , Invoice
 import shutil
 import time 
 from app.models.database import SessionLocal, Order, UploadedImage, Video, User ,Notification
@@ -13,6 +13,7 @@ from sqlalchemy.sql import func
 from app.services.runway_service import generate_video
 from datetime import timedelta
 import dropbox
+from app.routers.auth import get_current_user
 from app.models.database import SessionLocal
 import dropbox, time, os, tempfile, shutil
 from fastapi import HTTPException
@@ -198,102 +199,267 @@ def admin_update_order_status(order_id: int, payload: dict):
         }
     finally:
         db.close()
+        
+def resolve_user_for_order(db: Session, order: Order):
+    """Try to find a user_id for an order using invoice/payment fallbacks."""
+    if order.user_id:
+        return order.user_id
 
+    # try invoice
+    inv = db.query(Invoice).filter(Invoice.order_id == order.id).order_by(Invoice.created_at.desc()).first()
+    if inv and inv.user_id:
+        return inv.user_id
 
-# ----------------------- ADMIN: UPLOAD FINAL VIDEO -----------------------
+    # try payment
+    pay = db.query(Payment).filter(Payment.order_id == order.id).order_by(Payment.created_at.desc()).first()
+    if pay and pay.user_id:
+        return pay.user_id
+
+    # no user found
+    return None
+
 @router.post("/admin/orders/{image_id}/final-video", tags=["Admin Portal"])
-async def admin_upload_final_video(image_id: int, file: UploadFile = File(...)):
-    """
-    Admin uploads a final rendered video for an image.
-    Saves it to Dropbox using OAuth2 refresh token and marks the latest Video as 'succeeded'.
-    """
-    
-
-    # ✅ Initialize Dropbox client with OAuth2 Refresh Token
-    dbx = dropbox.Dropbox(
-        app_key=DROPBOX_APP_KEY,
-        app_secret=DROPBOX_APP_SECRET,
-        oauth2_refresh_token=DROPBOX_REFRESH_TOKEN
-    )
-
+async def admin_upload_final_video(
+    image_id: int,
+    file: UploadFile = File(...),
+    assign_user_id: int | None = None,         # optional admin override
+    assign_user_email: str | None = None,      # optional admin override
+):
     db = SessionLocal()
     try:
-        # 🔍 Fetch the image entry
         image = db.query(UploadedImage).filter(UploadedImage.id == image_id).first()
         if not image:
             raise HTTPException(status_code=404, detail="Image not found")
 
+        order = db.query(Order).filter(Order.id == image.order_id).first()
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+
+        # Prefer explicit admin override if provided
+        user_id = None
+        if assign_user_id:
+            user_id = assign_user_id
+        elif assign_user_email:
+            u = db.query(User).filter(User.email == assign_user_email).first()
+            if not u:
+                raise HTTPException(status_code=404, detail=f"No user with email {assign_user_email}")
+            user_id = u.id
+        else:
+            # fallback resolution
+            user_id = resolve_user_for_order(db, order)
+
+        if not user_id:
+            # Helpful error: tells admin what to do
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Order has no associated user_id. Provide assign_user_id or assign_user_email "
+                    "or fix the order record. Order id: %s" % order.id
+                )
+            )
+
+        # --- file save & dropbox upload (same as you had) ---
         ts = int(time.time())
         filename = f"final_{image_id}_{ts}.mp4"
-
-        # ✅ Save uploaded file temporarily
-        temp_dir = tempfile.gettempdir()
-        temp_path = os.path.join(temp_dir, filename)
-
+        temp_path = os.path.join(tempfile.gettempdir(), filename)
         with open(temp_path, "wb") as out:
             shutil.copyfileobj(file.file, out)
 
-        # ✅ Upload file to Dropbox
-        dropbox_path = f"/videos/{filename}"
+        dbx = dropbox.Dropbox(
+            app_key=os.getenv("DROPBOX_APP_KEY"),
+            app_secret=os.getenv("DROPBOX_APP_SECRET"),
+            oauth2_refresh_token=os.getenv("DROPBOX_REFRESH_TOKEN"),
+        )
+        dropbox_path = f"/final_videos/{filename}"
         with open(temp_path, "rb") as f:
             dbx.files_upload(f.read(), dropbox_path, mode=dropbox.files.WriteMode("overwrite"))
 
-        # ✅ Create a shareable Dropbox link (and convert to raw link)
         shared_link_metadata = dbx.sharing_create_shared_link_with_settings(dropbox_path)
         video_url = shared_link_metadata.url.replace("?dl=0", "?raw=1")
 
-        # ✅ Find latest or create new Video record
+        # Update/Create Video row
         latest_video = (
             db.query(Video)
             .filter(Video.image_id == image_id)
             .order_by(Video.iteration.desc(), Video.id.desc())
             .first()
         )
-
         if not latest_video:
             latest_video = Video(
-                image_id=image_id,
+                image_id=image.id,
                 prompt=image.prompt or "",
+                status="succeeded",
                 iteration=1,
+                video_path=dropbox_path,
+                video_url=video_url,
+                created_at=datetime.utcnow(),
+                user_id=user_id,
             )
             db.add(latest_video)
-            db.commit()
-            db.refresh(latest_video)
+        else:
+            latest_video.status = "succeeded"
+            latest_video.video_path = dropbox_path
+            latest_video.video_url = video_url
+            latest_video.updated_at = datetime.utcnow()
+            latest_video.user_id = user_id
 
-        # ✅ Update DB with Dropbox info
-        latest_video.status = "succeeded"
-        latest_video.video_path = dropbox_path
-        latest_video.video_url = video_url
-        latest_video.updated_at = datetime.utcnow()
         db.commit()
+        db.refresh(latest_video)
 
-        # ✅ Mirror info on UploadedImage
+        # Update UploadedImage
         image.video_path = dropbox_path
         image.video_url = video_url
         image.video_generated_at = datetime.utcnow()
         db.commit()
 
-        # ✅ Clean up temp file
+        # Save FinalVideo
+        final_video = FinalVideo(
+            user_id=user_id,
+            image_id=image.id,
+            dropbox_path=dropbox_path,
+            video_url=video_url,
+            created_at=datetime.utcnow(),
+        )
+        db.add(final_video)
+        db.commit()
+        db.refresh(final_video)
+
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
         return {
             "image_id": image.id,
+            "user_id": user_id,
             "video_id": latest_video.id,
-            "status": latest_video.status,
-            "dropbox_path": dropbox_path,
+            "final_video_id": final_video.id,
             "video_url": video_url,
-            "message": "Final video uploaded successfully to Dropbox.",
+            "dropbox_path": dropbox_path,
         }
 
     except dropbox.exceptions.ApiError as e:
         raise HTTPException(status_code=500, detail=f"Dropbox upload failed: {str(e)}")
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail={str(e)})
-
     finally:
         db.close()
+
+# ----------------------- ADMIN: UPLOAD FINAL VIDEO -----------------------
+# @router.post("/admin/orders/{image_id}/final-video", tags=["Admin Portal"])
+# async def admin_upload_final_video(image_id: int, file: UploadFile = File(...)):
+#     """
+#     Admin uploads a final rendered video for an image.
+#     The function:
+#       - uploads to Dropbox,
+#       - updates the video + image,
+#       - and stores FinalVideo linked to the correct user automatically.
+#     """
+
+#     dbx = dropbox.Dropbox(
+#         app_key=os.getenv("DROPBOX_APP_KEY"),
+#         app_secret=os.getenv("DROPBOX_APP_SECRET"),
+#         oauth2_refresh_token=os.getenv("DROPBOX_REFRESH_TOKEN"),
+#     )
+
+#     db = SessionLocal()
+#     try:
+#         # 🔍 Get the image
+#         image = db.query(UploadedImage).filter(UploadedImage.id == image_id).first()
+#         if not image:
+#             raise HTTPException(status_code=404, detail="Image not found")
+
+#         # 🔍 Get order (linked to user)
+#         order = db.query(Order).filter(Order.id == image.order_id).first()
+#         if not order:
+#             raise HTTPException(status_code=404, detail="Order not found")
+
+#         # ✅ Ensure user_id exists
+#         if not order.user_id:
+#             raise HTTPException(status_code=400, detail="Order has no associated user")
+
+#         # ✅ Prepare filename
+#         ts = int(time.time())
+#         filename = f"final_{image_id}_{ts}.mp4"
+#         temp_path = os.path.join(tempfile.gettempdir(), filename)
+
+#         # ✅ Save temp file
+#         with open(temp_path, "wb") as buffer:
+#             shutil.copyfileobj(file.file, buffer)
+
+#         # ✅ Upload to Dropbox
+#         dropbox_path = f"/final_videos/{filename}"
+#         with open(temp_path, "rb") as f:
+#             dbx.files_upload(f.read(), dropbox_path, mode=dropbox.files.WriteMode("overwrite"))
+
+#         shared_link_metadata = dbx.sharing_create_shared_link_with_settings(dropbox_path)
+#         video_url = shared_link_metadata.url.replace("?dl=0", "?raw=1")
+
+#         # ✅ Update or create Video entry
+#         latest_video = (
+#             db.query(Video)
+#             .filter(Video.image_id == image_id)
+#             .order_by(Video.iteration.desc(), Video.id.desc())
+#             .first()
+#         )
+
+#         if not latest_video:
+#             latest_video = Video(
+#                 image_id=image.id,
+#                 prompt=image.prompt or "",
+#                 status="succeeded",
+#                 iteration=1,
+#                 video_path=dropbox_path,
+#                 video_url=video_url,
+#                 created_at=datetime.utcnow(),
+#                 user_id=order.user_id,
+#             )
+#             db.add(latest_video)
+#         else:
+#             latest_video.status = "succeeded"
+#             latest_video.video_path = dropbox_path
+#             latest_video.video_url = video_url
+#             latest_video.updated_at = datetime.utcnow()
+#             latest_video.user_id = order.user_id
+
+#         db.commit()
+#         db.refresh(latest_video)
+
+#         # ✅ Update image record
+#         image.video_path = dropbox_path
+#         image.video_url = video_url
+#         image.video_generated_at = datetime.utcnow()
+#         db.commit()
+
+#         # ✅ Save FinalVideo linked to the same user
+#         final_video = FinalVideo(
+#             user_id=order.user_id,
+#             image_id=image.id,
+#             dropbox_path=dropbox_path,
+#             video_url=video_url,
+#             created_at=datetime.utcnow(),
+#         )
+#         db.add(final_video)
+#         db.commit()
+#         db.refresh(final_video)
+
+#         # ✅ Cleanup
+#         if os.path.exists(temp_path):
+#             os.remove(temp_path)
+
+#         return {
+#             "image_id": image.id,
+#             "user_id": order.user_id,
+#             "video_id": latest_video.id,
+#             "final_video_id": final_video.id,
+#             "video_url": video_url,
+#             "dropbox_path": dropbox_path,
+#             "status": "✅ Final video uploaded and linked successfully"
+#         }
+
+#     except dropbox.exceptions.ApiError as e:
+#         raise HTTPException(status_code=500, detail=f"Dropbox upload failed: {str(e)}")
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=str(e))
+#     finally:
+#         db.close()
+
 
 
 # ----------------------- ADMIN: CUSTOMIZE PROMPT & REGENERATE -----------------------
