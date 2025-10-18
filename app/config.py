@@ -23,6 +23,12 @@ STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "").strip()
 STRIPE_PUBLISHABLE_KEY = os.getenv("STRIPE_PUBLISHABLE_KEY", "").strip()
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
 
+
+# ✅ Dropbox credentials
+DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
+DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
+DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
+
 if not RUNWAY_API_KEY:
     print("⚠️ WARNING: RUNWAY_API_KEY is not set!")
 
