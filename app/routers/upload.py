@@ -316,7 +316,7 @@ async def upload_photos(
             "order_id": order.id,
             "package": order.package,
             "add_ons": order.add_ons,
-            "image_id": Video.image_id
+            # "image_id": Video.image_id
         }
 
     finally:
