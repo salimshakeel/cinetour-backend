@@ -112,12 +112,16 @@ def get_order_status():
             photo_count = len(images)
 
             # Determine order status
-            if all(v.status == "completed" for v in image_id_to_video.values()):
+            # Treat 'succeeded' as equivalent to 'completed'
+            if all(v.status in ["completed", "succeeded"] for v in image_id_to_video.values()):
                 status = "completed"
             elif any(v.status == "processing" for v in image_id_to_video.values()):
                 status = "processing"
+            elif any(v.status == "failed" for v in image_id_to_video.values()):
+                status = "failed"
             else:
                 status = "submitted"
+
 
             response.append({
                 "order_id": order.id,
