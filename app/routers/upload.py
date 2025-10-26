@@ -274,6 +274,8 @@ async def upload_photos(
     add_ons: Optional[str] = Form(None),
     files: List[UploadFile] = File(...)
 ):
+    print("[UPLOAD] Endpoint called ✅")
+    
     # if package not in PACKAGE_LIMITS:
     #     raise HTTPException(status_code=400, detail="Invalid package selected")
 
@@ -307,9 +309,11 @@ async def upload_photos(
             except Exception as e:
                 print(f"[ERROR] Could not save {file.filename}: {e}")
                 raise HTTPException(status_code=500, detail=f"Failed to save {file.filename}")
+        print("[UPLOAD] Adding background task now...")
 
         # ✅ Pass order.id + saved file paths (not UploadFile objects!)
         background_tasks.add_task(process_videos_for_order, order.id, saved_files)
+        print("[UPLOAD] Background task added successfully")
 
         return {
             "status": "success",
