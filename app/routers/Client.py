@@ -285,12 +285,13 @@ def get_client_orders(
         image_id_to_video = {v.image_id: v for v in latest_videos}
         statuses = [v.status for v in image_id_to_video.values()]
 
-        if all(s == "succeeded" for s in statuses):
+        if statuses and all(s == "succeeded" for s in statuses):
             status = "completed"
         elif any(s == "processing" for s in statuses):
             status = "processing"
         else:
             status = "submitted"
+
 
         response.append({
             "order_id": order.id,
