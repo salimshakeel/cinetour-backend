@@ -275,7 +275,7 @@ async def upload_photos(
     files: List[UploadFile] = File(...)
 ):
     print("[UPLOAD] Endpoint called ✅")
-    
+
     # if package not in PACKAGE_LIMITS:
     #     raise HTTPException(status_code=400, detail="Invalid package selected")
 
@@ -286,9 +286,10 @@ async def upload_photos(
     #         status_code=400,
     #         detail=f"{package} allows {min_files}-{max_files} photos"
     #     )
+
     db = SessionLocal()
     try:
-        # create order
+        # Create a new order
         order = Order(
             package=package,
             add_ons=add_ons
@@ -297,35 +298,41 @@ async def upload_photos(
         db.commit()
         db.refresh(order)
 
+        print(f"[UPLOAD] New order created → ID: {order.id}")
+
         saved_files = []
         for file in files:
             dst_path = os.path.join(IMAGES_DIR, file.filename)
             print(f"[STEP] Saving file → {dst_path}")
             try:
                 with open(dst_path, "wb") as f:
-                    shutil.copyfileobj(file.file, f)   # save immediately
-                print(f"[OK] Saved file {file.filename}")
+                    shutil.copyfileobj(file.file, f)
                 saved_files.append(dst_path)
+                print(f"[OK] Saved file {file.filename}")
             except Exception as e:
                 print(f"[ERROR] Could not save {file.filename}: {e}")
                 raise HTTPException(status_code=500, detail=f"Failed to save {file.filename}")
-        print("[UPLOAD] Adding background task now...")
 
-        # ✅ Pass order.id + saved file paths (not UploadFile objects!)
+        print("[UPLOAD] Adding background task now...")
         background_tasks.add_task(process_videos_for_order, order.id, saved_files)
         print("[UPLOAD] Background task added successfully")
 
-        return {
+        # ✅ Build structured response
+        response_data = {
             "status": "success",
             "order_id": order.id,
             "package": order.package,
             "add_ons": order.add_ons,
-            # "image_id": Video.image_id
+            "status": "processing",
+            "date": order.created_at.isoformat() if hasattr(order, "created_at") else str(datetime.utcnow()),
+            "videos": []
         }
+
+        print(f"[UPLOAD] Returning response → {response_data}")
+        return response_data
 
     finally:
         db.close()
-
 
 # ----------------------- FEEDBACK -----------------------
 class FeedbackPayload(BaseModel):
