@@ -79,10 +79,17 @@ def list_videos():
 def get_order_status():
     db = SessionLocal()
     try:
-        orders = db.query(Order).order_by(Order.created_at.desc()).all()
+        # ✅ Join Orders with Users to fetch email directly
+        orders_with_users = (
+            db.query(Order, User)
+            .join(User, Order.user_id == User.id)
+            .order_by(Order.created_at.desc())
+            .all()
+        )
+
         response = []
 
-        for order in orders:
+        for order, user in orders_with_users:
             # Get images for this order
             images = db.query(UploadedImage).filter(UploadedImage.order_id == order.id).all()
 
@@ -112,7 +119,6 @@ def get_order_status():
             photo_count = len(images)
 
             # Determine order status
-            # Treat 'succeeded' as equivalent to 'completed'
             if all(v.status in ["completed", "succeeded"] for v in image_id_to_video.values()):
                 status = "completed"
             elif any(v.status == "processing" for v in image_id_to_video.values()):
@@ -122,10 +128,11 @@ def get_order_status():
             else:
                 status = "submitted"
 
-
             response.append({
                 "order_id": order.id,
-                "client": order.user_id,
+                "client_id": user.id,
+                "client_email": user.email,
+                "client_name": user.name,
                 "package": order.package,
                 "add_ons": order.add_ons,
                 "photos": photo_count,
@@ -684,21 +691,20 @@ from sqlalchemy.orm import joinedload
 
 #     finally:
 #         db.close()
-
 @router.get("/admin/logs-status", tags=["Admin Portal"])
 def admin_logs_status():
-    """Return grouped and readable video processing logs."""
+    """Return grouped and readable video processing logs with client info."""
     db = SessionLocal()
     try:
         now = datetime.now(timezone.utc)
         response = {"queued": [], "processing": [], "succeeded": [], "failed": []}
 
-        # Loop through each status type
         for status in ["queued", "processing", "succeeded", "failed"]:
             videos = (
                 db.query(Video)
                 .join(UploadedImage, Video.image_id == UploadedImage.id)
                 .join(Order, UploadedImage.order_id == Order.id)
+                .join(User, Order.user_id == User.id, isouter=True)  # Left join for guests
                 .filter(Video.status == status)
                 .order_by(Video.created_at.desc())
                 .limit(20)
@@ -710,7 +716,6 @@ def admin_logs_status():
                 order = image.order if image else None
                 user = order.user if order else None
 
-                # Calculate elapsed time
                 created_at = v.created_at or now
                 if created_at.tzinfo is None:
                     created_at = created_at.replace(tzinfo=timezone.utc)
@@ -721,15 +726,18 @@ def admin_logs_status():
                     "video_id": v.id,
                     "prompt": v.prompt[:80] + "..." if len(v.prompt) > 80 else v.prompt,
                     "package": order.package if order else "Unknown",
-                    "client": user.email if user else "Guest",
+                    "client_id": user.id if user else None,
+                    "client_email": user.email if user else "Guest",
+                    "client_name": user.name if user else "Guest User",
                     "created_at": v.created_at.isoformat() if v.created_at else None,
                     "elapsed_time": f"{elapsed_minutes} min ago",
                     "video_url": v.video_url,
                     "runway_job_id": v.runway_job_id,
                     "iteration": v.iteration,
+                    "status": v.status,
                 })
 
-        # Add summary counts
+
         summary = {
             "queued": db.query(Video).filter(Video.status == "queued").count(),
             "processing": db.query(Video).filter(Video.status == "processing").count(),
