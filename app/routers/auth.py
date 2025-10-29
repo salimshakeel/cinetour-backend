@@ -8,6 +8,7 @@ from google.auth.transport import requests
 import hashlib
 import jwt
 import os
+from app.services.email_utils import send_reset_email
 import time
 
 from app.models.database import SessionLocal, User, get_db
@@ -283,3 +284,51 @@ def refresh_access_token(req: RefreshRequest):
         raise HTTPException(status_code=401, detail="Refresh token expired")
     except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="Invalid refresh token")
+    
+import secrets
+
+RESET_TOKEN_EXPIRY_HOURS = 1
+RESET_TOKENS = {}  # In-memory (you can later move this to DB)
+
+@router.post("/forgot-password")
+def forgot_password(email: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    token = secrets.token_urlsafe(32)
+    RESET_TOKENS[token] = {
+        "user_id": user.id,
+        "expires_at": datetime.utcnow() + timedelta(hours=RESET_TOKEN_EXPIRY_HOURS)
+    }
+
+    reset_link = f"https://cinetours.vercel.app/reset-password?token={token}"
+    send_reset_email(user.email, reset_link)
+
+    return {"message": "Password reset link sent to your email."}
+
+from fastapi import Body
+from passlib.context import CryptContext
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+@router.post("/reset-password")
+def reset_password(token: str = Body(...), new_password: str = Body(...), db: Session = Depends(get_db)):
+    token_data = RESET_TOKENS.get(token)
+    if not token_data:
+        raise HTTPException(status_code=400, detail="Invalid or expired token")
+
+    if datetime.utcnow() > token_data["expires_at"]:
+        raise HTTPException(status_code=400, detail="Token has expired")
+
+    user = db.query(User).filter(User.id == token_data["user_id"]).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    user.password_hash = pwd_context.hash(new_password)
+    db.commit()
+
+    # Remove token once used
+    del RESET_TOKENS[token]
+
+    return {"message": "Password has been reset successfully."}
