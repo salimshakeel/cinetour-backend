@@ -396,3 +396,65 @@ def get_client_invoices(
         })
 
     return {"user": current_user.email, "invoices": response}
+
+from fastapi import APIRouter, UploadFile, File, HTTPException
+from dotenv import load_dotenv
+import os
+import dropbox
+from datetime import datetime
+
+# Load environment variables
+load_dotenv()
+
+DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
+DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
+DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
+DROPBOX_FOLDER_PATH = "/brand_assets"
+
+
+
+def get_dropbox_access_token():
+    """Generate Dropbox access token using refresh token."""
+    import requests
+    url = "https://api.dropboxapi.com/oauth2/token"
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": DROPBOX_REFRESH_TOKEN,
+        "client_id": DROPBOX_APP_KEY,
+        "client_secret": DROPBOX_APP_SECRET,
+    }
+    response = requests.post(url, data=data)
+    if response.status_code != 200:
+        raise HTTPException(status_code=400, detail=f"Dropbox token refresh failed: {response.text}")
+    return response.json()["access_token"]
+
+@router.post("/brand_assets")
+async def upload_brand_asset(file: UploadFile = File(...)):
+    """
+    Upload a brand logo to Dropbox and return the shareable URL.
+    """
+    try:
+        # Generate a fresh access token
+        access_token = get_dropbox_access_token()
+        dbx = dropbox.Dropbox(access_token)
+
+        dropbox_path = f"{DROPBOX_FOLDER_PATH}/{file.filename}"
+
+        # Upload the file
+        dbx.files_upload(file.file.read(), dropbox_path, mode=dropbox.files.WriteMode.overwrite)
+
+        # Create a shareable link
+        shared_link = dbx.sharing_create_shared_link_with_settings(dropbox_path).url
+        public_url = shared_link.replace("?dl=0", "?dl=1")
+
+        return {
+            "message": "✅ Brand asset uploaded successfully!",
+            "file_name": file.filename,
+            "dropbox_url": public_url,
+            "uploaded_at": datetime.utcnow().isoformat()
+        }
+
+    except dropbox.exceptions.ApiError as e:
+        raise HTTPException(status_code=400, detail=f"Dropbox error: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")

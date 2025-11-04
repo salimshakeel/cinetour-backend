@@ -178,3 +178,14 @@ class FinalVideo(Base):
 
     user = relationship("User")
     image = relationship("UploadedImage")
+    
+
+class BrandAsset(Base):
+    __tablename__ = "brand_assets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # optional link to user
+    filename = Column(String, nullable=False)
+    content = Column(LargeBinary, nullable=False)
+    dropbox_path = Column(String, nullable=True)
+    uploaded_at = Column(DateTime, default=datetime.utcnow)

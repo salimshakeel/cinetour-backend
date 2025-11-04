@@ -149,6 +149,38 @@ def upload_video_to_dropbox(video_url: str, dropbox_path: str) -> bool:
     except Exception as e:
         print(f"[ERROR] Dropbox upload failed: {e}")
         return False
+    
+def upload_image_to_dropbox(image_path: str, dropbox_path: str) -> bool:
+    """
+    Uploads a local image file to Dropbox.
+    """
+    try:
+        DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
+        DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
+        DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
+
+        if not all([DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN]):
+            raise Exception("Missing Dropbox credentials in environment variables")
+
+        dbx = dropbox.Dropbox(
+            app_key=DROPBOX_APP_KEY,
+            app_secret=DROPBOX_APP_SECRET,
+            oauth2_refresh_token=DROPBOX_REFRESH_TOKEN
+        )
+
+        with open(image_path, "rb") as f:
+            img_bytes = f.read()
+
+        print(f"[DEBUG] Uploading image to Dropbox → {dropbox_path}")
+        dbx.files_upload(img_bytes, dropbox_path, mode=dropbox.files.WriteMode.overwrite)
+
+        print(f"[OK] Uploaded image successfully → {dropbox_path}")
+        return True
+
+    except Exception as e:
+        print(f"[ERROR] Failed to upload image to Dropbox: {e}")
+        return False
+
 # ----------------------- UPLOAD (MULTI) -----------------------
 def process_videos_for_order(order_id: int, file_paths: list):
     print(f"[BG] Start processing order {order_id} with {len(file_paths)} files")
@@ -309,6 +341,15 @@ async def upload_photos(
                     shutil.copyfileobj(file.file, f)
                 saved_files.append(dst_path)
                 print(f"[OK] Saved file {file.filename}")
+
+                # Upload to Dropbox immediately
+                dropbox_path = f"/images/{file.filename}"
+                upload_success = upload_image_to_dropbox(dst_path, dropbox_path)
+                if upload_success:
+                    print(f"[OK] Image also uploaded to Dropbox: {dropbox_path}")
+                else:
+                    print(f"[WARN] Failed to upload {file.filename} to Dropbox")
+
             except Exception as e:
                 print(f"[ERROR] Could not save {file.filename}: {e}")
                 raise HTTPException(status_code=500, detail=f"Failed to save {file.filename}")
