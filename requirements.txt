@@ -21,3 +21,4 @@ stripe
 bcrypt
 python-jose[cryptography]
 passlib[bcrypt]
+sendgrid>=6.12.5
