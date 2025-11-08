@@ -332,3 +332,7 @@ def reset_password(token: str = Body(...), new_password: str = Body(...), db: Se
     del RESET_TOKENS[token]
 
     return {"message": "Password has been reset successfully."}
+
+print ("hello world")
+
+

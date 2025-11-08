@@ -16,6 +16,7 @@ import dropbox
 from app.routers.auth import get_current_user
 from app.models.database import SessionLocal
 import dropbox, time, os, tempfile, shutil
+import re
 from fastapi import HTTPException
 from datetime import datetime
 from app.models.database import UploadedImage, Video
@@ -34,6 +35,57 @@ dbx = dropbox.Dropbox(
             oauth2_refresh_token=DROPBOX_REFRESH_TOKEN
         )
 router = APIRouter()
+# Helper to present a professional-looking code for users (guest vs registered)
+def _format_user_code(user: User | None) -> str | None:
+    try:
+        if not user:
+            return None
+        prefix = "GST" if (getattr(user, "is_guest", False) or not getattr(user, "email", None)) else "USR"
+        return f"{prefix}-{int(user.id):05d}"
+    except Exception:
+        return None
+
+def _user_from_video(db: Session, v: Video) -> User | None:
+    """Resolve a user for a given video by preferring Video.user, then Image->Order->User,
+    else fallback to Invoice.user or Payment.user for the same order if present."""
+    try:
+        # 1) direct on Video
+        if getattr(v, "user_id", None):
+            u = db.query(User).filter(User.id == v.user_id).first()
+            if u:
+                return u
+        # 2) via relationships
+        if v.image and v.image.order:
+            order = v.image.order
+            if order.user_id:
+                u = db.query(User).filter(User.id == order.user_id).first()
+                if u:
+                    return u
+            # 3) fallback to invoice mapping if available
+            inv = (
+                db.query(Invoice)
+                .filter(Invoice.order_id == order.id)
+                .order_by(Invoice.created_at.desc())
+                .first()
+            )
+            if inv and inv.user_id:
+                u = db.query(User).filter(User.id == inv.user_id).first()
+                if u:
+                    return u
+            # 4) fallback to payment mapping if available
+            pay = (
+                db.query(Payment)
+                .filter(Payment.order_id == order.id)
+                .order_by(Payment.created_at.desc())
+                .first()
+            )
+            if pay and pay.user_id:
+                u = db.query(User).filter(User.id == pay.user_id).first()
+                if u:
+                    return u
+    except Exception:
+        return None
+    return None
 # ---------------- ADMIN: VIDEOS LISTING ----------------
 @router.get("/admin/videos", tags=["Admin Portal"])
 def list_videos():
@@ -46,16 +98,21 @@ def list_videos():
         for v in videos:
             filename = os.path.basename(v.video_path) if v.video_path else None
             local_url = f"/videos/{filename}" if filename else None
-            # fetch image and order for context
             image = db.query(UploadedImage).filter(UploadedImage.id == v.image_id).first()
             order = db.query(Order).filter(Order.id == image.order_id).first() if image else None
-            client_id = order.user_id if order else None
-            # build image public url
+            user = db.query(User).filter(User.id == order.user_id).first() if order and order.user_id else None
             image_url = f"/uploaded_images/{image.filename}" if image and image.filename else None
+
+            # Consistent naming + provide stable unique download name
+            download_filename = f"video_{v.id}.mp4"
+
             items.append({
                 "video_id": v.id,
                 "image_id": v.image_id,
-                "client_id": client_id,
+                "user_id": user.id if user else None,
+                "user_email": user.email if user else None,
+                "user_name": user.name if user else None,
+                "user_code": _format_user_code(user),
                 "status": v.status,
                 "prompt": v.prompt,
                 "created_at": v.created_at.isoformat() if v.created_at else None,
@@ -63,8 +120,9 @@ def list_videos():
                 "runway_job_id": v.runway_job_id,
                 "remote_url": v.video_url,
                 "local_url": local_url,
-                "filename": filename,
-                "download_url": local_url,  # same as local_url; frontend can use download attribute
+                "filename": filename,                 # original base name if present
+                "download_filename": download_filename, # unique suggested name
+                "download_url": local_url,
                 "image_filename": image.filename if image else None,
                 "image_url": image_url,
             })
@@ -130,9 +188,10 @@ def get_order_status():
 
             response.append({
                 "order_id": order.id,
-                "client_id": user.id,
-                "client_email": user.email,
-                "client_name": user.name,
+                "user_id": user.id,
+                "user_email": user.email,
+                "user_name": user.name,
+                "user_code": _format_user_code(user),
                 "package": order.package,
                 "add_ons": order.add_ons,
                 "photos": photo_count,
@@ -140,7 +199,8 @@ def get_order_status():
                 "date": order.created_at,
                 "videos": [
                     {
-                        "filename": v.video_path.split("/")[-1] if v.video_path else None,
+                        "filename": (v.video_path.split("/")[-1] if v.video_path else None),
+                        "download_filename": f"video_{v.id}.mp4",
                         "url": v.video_url or "",
                         "status": v.status
                     }
@@ -579,11 +639,19 @@ def admin_regenerate_video(image_id: int, payload: dict):
         out_filename = f"regen_{image_id}_{ts}.mp4"
         out_path = os.path.join("videos", out_filename)
 
+        # Determine next iteration number
+        latest_for_image = (
+            db.query(Video)
+            .filter(Video.image_id == image.id)
+            .order_by(Video.iteration.desc(), Video.id.desc())
+            .first()
+        )
+
         # Create Video record first (with queued status)
         video = Video(
             image_id=image.id,
             prompt=new_prompt,
-            iteration=next_iteration,
+            iteration=((latest_for_image.iteration if latest_for_image and latest_for_image.iteration else 0) + 1),
             status="queued",
             runway_job_id=None
         )
@@ -726,15 +794,17 @@ def admin_logs_status():
                     "video_id": v.id,
                     "prompt": v.prompt[:80] + "..." if len(v.prompt) > 80 else v.prompt,
                     "package": order.package if order else "Unknown",
-                    "client_id": user.id if user else None,
-                    "client_email": user.email if user else "Guest",
-                    "client_name": user.name if user else "Guest User",
+                    "user_id": user.id if user else None,
+                    "user_email": user.email if user else "Guest",
+                    "user_name": user.name if user else "Guest User",
+                    "user_code": _format_user_code(user) if user else None,
                     "created_at": v.created_at.isoformat() if v.created_at else None,
                     "elapsed_time": f"{elapsed_minutes} min ago",
                     "video_url": v.video_url,
                     "runway_job_id": v.runway_job_id,
                     "iteration": v.iteration,
                     "status": v.status,
+                    "download_filename": f"video_{v.id}.mp4",
                 })
 
 
@@ -788,12 +858,10 @@ def admin_notifications():
             })
 
         for v in succeeded_videos:
-            user_email = "Guest"
-            user_id = None
-
-            if v.image and v.image.order and v.image.order.user:
-                user_email = v.image.order.user.email or "Guest"
-                user_id = v.image.order.user.id
+            u = _user_from_video(db, v)
+            user_email = (u.email if u and u.email else "Guest")
+            user_id = (u.id if u else None)
+            user_code = _format_user_code(u) if u else None
 
             notifications.append({
                 "type": "video_completed",
@@ -802,19 +870,34 @@ def admin_notifications():
                 "video_path": v.video_path,
                 "image_id": v.image_id,
                 "order_id": v.image.order_id,
-                "user_id": v.image.order.user_id,
+                "user_id": user_id,
                 "user_email": user_email,
+                "user_code": user_code,
                 "category": "video_processing"
             })
 
         # 2️⃣ Notifications from the Notification table (new users, etc.)
         recent_notifications = db.query(Notification).order_by(Notification.created_at.desc()).limit(20).all()
         for notif in recent_notifications:
+            notif_user = notif.user if notif.user_id else None
+            # Backfill: parse video id from message if user is missing
+            if not notif_user:
+                try:
+                    m = re.search(r"Video\s+#(\d+)", notif.message or "")
+                    if m:
+                        vid = int(m.group(1))
+                        v = db.query(Video).filter(Video.id == vid).first()
+                        if v:
+                            notif_user = _user_from_video(db, v)
+                except Exception:
+                    pass
+
             notifications.append({
                 "type": notif.type,
                 "message": notif.message,
-                "user_id": notif.user_id,
-                "user_email": notif.user.email if notif.user else "Guest",
+                "user_id": (notif_user.id if notif_user else notif.user_id),
+                "user_email": (notif_user.email if notif_user and notif_user.email else "Guest"),
+                "user_code": _format_user_code(notif_user) if notif_user else None,
                 "is_read": notif.is_read,
                 "created_at": notif.created_at.isoformat(),
                 "category": "system_notifications"
@@ -852,7 +935,7 @@ def get_all_clients(db: Session = Depends(get_db)):
     for client in clients:
         total_orders = db.query(Order).filter(Order.user_id == client.id).count()
         response.append({
-            "id": client.id,
+            "user_id": client.id,
             "name": client.name or "N/A",
             "email": client.email,
             "joined": client.created_at.strftime("%Y-%m-%d") if client.created_at else None,

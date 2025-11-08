@@ -1,10 +1,14 @@
-from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form, BackgroundTasks
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import func
 from typing import List, Optional
 from datetime import datetime
 import shutil, os
 from app.routers.auth import get_current_user
+from app.routers.upload import IMAGES_DIR, process_videos_for_order
+from app.config import STRIPE_SECRET_KEY
+import stripe
+stripe.api_key = STRIPE_SECRET_KEY
 
 from app.models.database import SessionLocal, Order, UploadedImage, Video, Invoice, User , Payment, FinalVideo
 
@@ -20,6 +24,15 @@ def get_db():
 
 
 # ---------------- CLIENT: STATUS ----------------
+
+@router.get("/whoami")
+def whoami(current_user: User = Depends(get_current_user)):
+    """Return the authenticated user's basic info for quick debugging."""
+    return {
+        "id": current_user.id,
+        "name": current_user.name,
+        "email": current_user.email
+    }
 
 @router.get("/client/status")
 def client_status(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -312,11 +325,26 @@ def get_client_orders(
     return {"orders": response, "count": len(response)}
 # ---------------- 3. REORDER ----------------
 @router.post("/orders/{order_id}/reorder")
-def reorder(order_id: int, db: Session = Depends(get_db)):
-    """Reorder: create a new order linked to a previous one."""
+def reorder(
+    order_id: int,
+    background_tasks: BackgroundTasks,
+    success_url: str = Form(...),
+    cancel_url: str = Form(...),
+    amount: int = Form(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Reorder: create a new order linked to a previous one.
+    - Verifies ownership
+    - Creates a new order linked via parent_order_id
+    - Initiates Stripe Checkout for payment (no re-upload/no package selection)
+    - Processing starts automatically after Stripe webhook confirms success
+    """
     old_order = db.query(Order).filter(Order.id == order_id).first()
     if not old_order:
         raise HTTPException(status_code=404, detail="Order not found")
+    if old_order.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not allowed to reorder this order")
 
     new_order = Order(
         user_id=old_order.user_id,
@@ -328,23 +356,44 @@ def reorder(order_id: int, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(new_order)
 
-    invoice = Invoice(order_id=new_order.id, user_id=old_order.user_id, amount=100, is_paid=False)
-    db.add(invoice)
-    db.commit()
-    db.refresh(invoice)
+    # Create Stripe Checkout session for this reorder
+    metadata = {
+        "user_id": str(current_user.id),
+        "order_id": str(new_order.id),
+        "addon_type": "reorder"
+    }
+    checkout_session = stripe.checkout.Session.create(
+        payment_method_types=['card'],
+        line_items=[{
+            'price_data': {
+                'currency': 'usd',
+                'product_data': {
+                    'name': 'Reorder',
+                    'description': 'Reorder processing fee'
+                },
+                'unit_amount': amount,
+            },
+            'quantity': 1,
+        }],
+        mode='payment',
+        success_url=success_url,
+        cancel_url=cancel_url,
+        metadata=metadata,
+        customer_email=current_user.email if current_user.email else None,
+    )
 
     return {
-        "message": "Reorder created successfully",
+        "message": "Reorder created successfully. Proceed to payment.",
         "order": {
             "id": new_order.id,
             "linked_to": old_order.id,
             "package": new_order.package,
             "add_ons": new_order.add_ons
         },
-        "invoice": {
-            "id": invoice.id,
-            "amount": invoice.amount,
-            "status": "unpaid"
+        "checkout": {
+            "session_id": checkout_session.id,
+            "url": checkout_session.url,
+            "amount": amount
         }
     }
 

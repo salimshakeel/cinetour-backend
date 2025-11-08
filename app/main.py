@@ -36,7 +36,8 @@ app.add_middleware(
     allow_origins=[
         "https://cinetours.vercel.app",      # frontend
         "https://quanatum-tour.onrender.com",  # ✅ correct backend domain
-        "http://localhost:3000",             # local dev
+        "http://localhost:3000",
+        "https://end-seven.vercel.app",# local dev
     ],
     allow_credentials=True,
     allow_methods=["*"],

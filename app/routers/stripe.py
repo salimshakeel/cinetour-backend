@@ -7,7 +7,9 @@ import os
 from datetime import datetime
 
 from app.config import STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET
-from app.models.database import SessionLocal, Payment, User, Order
+from app.models.database import SessionLocal, Payment, User, Order, UploadedImage
+from app.routers.upload import IMAGES_DIR, process_videos_for_order
+import threading, os
 
 # Initialize Stripe
 stripe.api_key = STRIPE_SECRET_KEY
@@ -195,6 +197,36 @@ async def handle_checkout_session_completed(session: Dict[str, Any], db):
         
         db.commit()
         print(f"Payment {payment.id} marked as succeeded")
+
+        # If this was a reorder, automatically start processing the new order
+        try:
+            md = session.get('metadata') or {}
+            if md.get('addon_type') == 'reorder' and md.get('order_id') and md.get('user_id'):
+                new_order_id = int(md['order_id'])
+                user_id = int(md['user_id'])
+                new_order = db.query(Order).filter(Order.id == new_order_id).first()
+                if new_order and new_order.parent_order_id:
+                    old_images = db.query(UploadedImage).filter(UploadedImage.order_id == new_order.parent_order_id).all()
+                    saved_files = []
+                    ts = int(datetime.utcnow().timestamp())
+                    for img in old_images:
+                        try:
+                            filename = img.filename or f"image_{img.id}.jpg"
+                            dst_path = os.path.join(IMAGES_DIR, f"reorder_{user_id}_{ts}_{filename}")
+                            if img.content:
+                                with open(dst_path, 'wb') as f:
+                                    f.write(img.content)
+                                saved_files.append(dst_path)
+                        except Exception:
+                            continue
+                    if saved_files:
+                        threading.Thread(
+                            target=process_videos_for_order,
+                            args=(new_order_id, saved_files, user_id),
+                            daemon=True
+                        ).start()
+        except Exception as auto_err:
+            print(f"Auto-processing after reorder payment failed to start: {auto_err}")
         
     except Exception as e:
         print(f"Error handling checkout session completed: {str(e)}")
