@@ -38,6 +38,7 @@ app.add_middleware(
         "https://quanatum-tour.onrender.com",  # ✅ correct backend domain
         "http://localhost:3000",
         "https://end-seven.vercel.app",# local dev
+        "https://end-phi-dun.vercel.app",  # deployed frontend
     ],
     allow_credentials=True,
     allow_methods=["*"],
