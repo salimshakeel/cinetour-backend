@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, UploadFile, File , Depends
+from fastapi import APIRouter, HTTPException, UploadFile, File , Depends, Form
 from datetime import datetime
 import os
 from datetime import datetime, timezone
@@ -414,13 +414,18 @@ def resolve_user_for_order(db: Session, order: Order):
 
 @router.post("/admin/final-video", tags=["Admin Portal"])
 async def admin_upload_final_video(
-    user_id: int,  # pass the client ID directly
+    user_id: int = Form(...),   # client ID (required)
     file: UploadFile = File(...)
 ):
     db = SessionLocal()
     try:
         # 1️⃣ Find all images for this user
-        images = db.query(UploadedImage).join(Order).filter(Order.user_id == user_id).all()
+        images = (
+            db.query(UploadedImage)
+            .join(Order)
+            .filter(Order.user_id == user_id)
+            .all()
+        )
         if not images:
             raise HTTPException(status_code=404, detail="No images found for this user")
 
