@@ -37,6 +37,7 @@ app.add_middleware(
         "https://cinetours.vercel.app",      # frontend
         "https://quanatum-tour.onrender.com",  # ✅ correct backend domain
         "https://quantum-tour-backend.onrender.com",
+        "https://quantumtour-60ux.onrender.com",
         "http://localhost:3000",
         "https://end-seven.vercel.app",# local dev
         "https://end-phi-dun.vercel.app",  # deployed frontend
